@@ -1,0 +1,141 @@
+import streamlit as st
+import pdfplumber
+import pandas as pd
+
+# --- ページ設定 ---
+st.set_page_config(page_title="請求書チェックツール", layout="wide")
+
+# --- 簡易認証機能 ---
+def check_password():
+    """パスワード認証が成功したらTrueを返す"""
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if st.session_state.password_correct:
+        return True
+
+    st.title("🔒 ログイン")
+    
+    # パスワード入力欄
+    password = st.text_input("パスワードを入力してください", type="password")
+    
+    if st.button("ログイン"):
+        # Secretsからパスワードを取得して照合
+        if password == st.secrets["APP_PASSWORD"]: 
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います")
+            
+    return False
+
+# 認証チェック：失敗したらここで処理を止める
+if not check_password():
+    st.stop()
+
+# ==========================================
+# メイン機能
+# ==========================================
+
+# --- 関数: PDFからテキスト/表データを抽出 ---
+def extract_data_from_pdf(file):
+    all_data = []
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    # 改行コードなどを除去
+                    cleaned_row = [str(cell).replace('\n', '').strip() if cell else '' for cell in row]
+                    all_data.append(cleaned_row)
+    if not all_data:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_data)
+    return df
+
+# --- 関数: 金額の数値化 ---
+def clean_currency(x):
+    if isinstance(x, str):
+        # カンマや円を除去して数値化
+        clean_str = x.replace(',', '').replace('円', '').replace('¥', '').strip()
+        if clean_str.replace('-', '').isnumeric(): # マイナス対応
+            return int(clean_str)
+    return x
+
+# --- アプリ画面 ---
+st.title('📄 レンタル伝票 差異チェックツール')
+st.markdown("---")
+
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("① 正本 (Master)")
+    file_master = st.file_uploader("ファイルをアップロード", type="pdf", key="master")
+with col2:
+    st.subheader("② 比較対象 (Target)")
+    file_target = st.file_uploader("ファイルをアップロード", type="pdf", key="target")
+
+if file_master and file_target:
+    with st.spinner('PDFを解析中...'):
+        try:
+            df1 = extract_data_from_pdf(file_master)
+            df2 = extract_data_from_pdf(file_target)
+
+            if df1.empty or df2.empty:
+                st.error("エラー: PDFから表データが見つかりませんでした。画像PDFの可能性があります。")
+            else:
+                st.success("読み込み完了！設定を行ってください。")
+                
+                with st.expander("読み込んだデータのプレビュー"):
+                    st.write("正本データ:", df1.head(3))
+
+                st.markdown("### 比較設定")
+                
+                # 列の選択（自動判定が難しいため手動選択）
+                col_options = df1.columns.tolist()
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    key_col = st.selectbox("キーとなる列（利用者IDや氏名）", col_options, index=0)
+                with c2:
+                    target_col = st.selectbox("比較する金額の列", col_options, index=len(col_options)-1)
+
+                if st.button("チェック実行", type="primary"):
+                    # データの結合
+                    merged = pd.merge(df1, df2, on=key_col, how='inner', suffixes=('_正', '_誤'))
+                    
+                    val_col_1 = f"{target_col}_正"
+                    val_col_2 = f"{target_col}_誤"
+                    
+                    # 数値化処理
+                    merged[val_col_1] = merged[val_col_1].apply(clean_currency)
+                    merged[val_col_2] = merged[val_col_2].apply(clean_currency)
+
+                    # 差異抽出
+                    # 両方とも数値に変換できた行だけを比較対象にする安全策
+                    merged_numeric = merged[pd.to_numeric(merged[val_col_1], errors='coerce').notnull() & 
+                                          pd.to_numeric(merged[val_col_2], errors='coerce').notnull()]
+
+                    diff_df = merged_numeric[merged_numeric[val_col_1] != merged_numeric[val_col_2]].copy()
+                    
+                    st.markdown("---")
+                    st.subheader("判定結果")
+                    
+                    if not diff_df.empty:
+                        st.error(f"⚠️ {len(diff_df)} 件の差異が見つかりました")
+                        
+                        # 結果テーブルの作成
+                        result_view = diff_df[[key_col, val_col_1, val_col_2]].copy()
+                        result_view.columns = ["キー項目", "正本の金額", "比較対象の金額"]
+                        result_view["差額"] = result_view["正本の金額"] - result_view["比較対象の金額"]
+                        
+                        st.dataframe(result_view, use_container_width=True)
+                        
+                        # ダウンロード
+                        csv = result_view.to_csv(index=False).encode('utf-8-sig')
+                        st.download_button("結果をCSVでダウンロード", csv, "check_result.csv", "text/csv")
+                    else:
+                        st.balloons()
+                        st.success("🎉 すべての金額が一致しました！")
+
+        except Exception as e:
+            st.error(f"予期せぬエラーが発生しました: {e}")

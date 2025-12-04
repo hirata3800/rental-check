@@ -87,11 +87,8 @@ def extract_fixed_format(file):
                     key = cleaned_row[0]
                     amount_str = cleaned_row[-1]
                     
-                    # === フィルター処理 (ここが重要) ===
+                    # === フィルター処理 ===
                     # キーが「数字6桁以上」で始まっていない行はゴミとみなして捨てる
-                    # 例: "0000011158 黒崎誠" -> OK
-                    # 例: "ページ 1" -> NG
-                    # 例: "備考..." -> NG
                     if not re.match(r'^\d{6,}', key):
                         continue
                     
@@ -131,4 +128,11 @@ if file_master and file_target:
         df_master = extract_fixed_format(file_master)
         df_target = extract_fixed_format(file_target)
 
-        if df_master.empty or
+        if df_master.empty or df_target.empty:
+            st.error("有効なデータが見つかりませんでした。「利用者ID(数字6桁以上)」で始まる行がない可能性があります。")
+        else:
+            # 2. 重複排除
+            df_master = df_master.drop_duplicates(subset=['key'])
+            df_target = df_target.drop_duplicates(subset=['key'])
+            
+            # 3. ②(Target)をベースに、①

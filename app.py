@@ -16,6 +16,7 @@ def check_password():
     st.title("🔒 ログイン")
     password = st.text_input("パスワードを入力してください", type="password")
     if st.button("ログイン"):
+        # Secretsに設定したパスワードと照合
         if password == st.secrets["APP_PASSWORD"]: 
             st.session_state.password_correct = True
             st.rerun()
@@ -56,10 +57,8 @@ def clean_currency(x):
 
 def extract_fixed_format(file):
     """
-    固定フォーマット前提の抽出処理
-    - 0列目: 利用者名/ID (Key)
-    - 最後の列: 請求額 (Value)
-    として扱います。
+    固定フォーマット抽出
+    - 先頭が「6桁以上の数字」で始まる行だけを抽出します
     """
     data_list = []
     with pdfplumber.open(file) as pdf:
@@ -80,20 +79,28 @@ def extract_fixed_format(file):
                     # データのクリーニング
                     cleaned_row = [clean_text(cell) for cell in row if cell is not None]
                     
-                    # データが少なすぎる行（ヘッダーの断片など）はスキップ
+                    # データが少なすぎる行はスキップ
                     if len(cleaned_row) < 2:
                         continue
 
-                    # 【重要】固定フォーマットルール
-                    # 1列目(index 0)をキー、最後尾(index -1)を金額とする
+                    # 1列目をキー、最後尾を金額とする
                     key = cleaned_row[0]
                     amount_str = cleaned_row[-1]
                     
-                    # キーが「利用者名」などのヘッダー行っぽい場合はスキップ
-                    if "利用者" in key or "請求額" in key or "金額" in amount_str:
+                    # === フィルター処理 (ここが重要) ===
+                    # キーが「数字6桁以上」で始まっていない行はゴミとみなして捨てる
+                    # 例: "0000011158 黒崎誠" -> OK
+                    # 例: "ページ 1" -> NG
+                    # 例: "備考..." -> NG
+                    if not re.match(r'^\d{6,}', key):
                         continue
-                        
-                    # 金額が数値として読めるかチェック（読めないならゴミ行の可能性）
+                    
+                    # 日付(スラッシュ入り)が先頭に来ている場合も除外
+                    if '/' in key:
+                        continue
+                    # ==================================
+
+                    # 金額変換
                     amount_val = clean_currency(amount_str)
                     
                     # リストに追加
@@ -110,7 +117,7 @@ def extract_fixed_format(file):
 # ==========================================
 
 st.title('📄 レンタル伝票 差異チェックツール')
-st.caption("左側の「>」を押すとメニューが隠れて広く使えます")
+st.caption("IDと名前がある行のみを自動抽出して比較します")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -124,80 +131,4 @@ if file_master and file_target:
         df_master = extract_fixed_format(file_master)
         df_target = extract_fixed_format(file_target)
 
-        if df_master.empty or df_target.empty:
-            st.error("データが読み取れませんでした。PDFの形式を確認してください。")
-        else:
-            # 2. 重複排除（同じ人が複数行あるとエラーになるため、最後の行を採用などの処理）
-            # ここではシンプルにそのままマージしますが、キー重複がある場合は注意
-            df_master = df_master.drop_duplicates(subset=['key'])
-            
-            # 3. ②(Target)をベースに、①(Master)を結合
-            merged = pd.merge(
-                df_target, 
-                df_master[['key', 'amount_val']], 
-                on='key', 
-                how='left', 
-                suffixes=('', '_master')
-            )
-            
-            # 4. 判定ロジック
-            # 差異フラグ: ①にあるけど金額が違う
-            merged['is_diff'] = (merged['amount_val'] != merged['amount_val_master']) & (merged['amount_val_master'].notna())
-            # 未登録フラグ: ①に存在しない
-            merged['is_new'] = merged['amount_val_master'].isna()
-            
-            # 5. 表示用データの整形
-            display_df = merged.copy()
-            
-            # 「正しい金額(①)」列を作る（差異がある時だけ表示、それ以外は空欄）
-            display_df['correct_val'] = display_df.apply(
-                lambda row: f"{int(row['amount_val_master']):,}" if row['is_diff'] else "", axis=1
-            )
-            
-            # 表示列の整理
-            final_view = display_df[['key', 'amount_raw', 'correct_val', 'is_diff', 'is_new']].copy()
-            final_view.columns = ['利用者名/ID', '請求額(②)', '正しい金額(①)', 'is_diff', 'is_new']
-
-            # ==========================================
-            # スタイリング（ここが色の設定）
-            # ==========================================
-            def highlight_rows(row):
-                styles = [''] * len(row)
-                
-                # ケース2: ①になくて②にある行（全体グレー）
-                if row['is_new']:
-                    # 薄いグレーの背景 + 文字色を薄く + 取り消し線
-                    return ['background-color: #f0f0f0; color: #a0a0a0; text-decoration: line-through;'] * len(row)
-                
-                # ケース1: 金額不一致（請求額を赤く、正しい金額を表示）
-                if row['is_diff']:
-                    # 請求額(②)の列は1番目（0始まり）
-                    styles[1] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                    # 正しい金額(①)の列は2番目
-                    styles[2] = 'color: blue; font-weight: bold;'
-                
-                return styles
-
-            # フラグ列は隠してスタイル適用
-            st.markdown("### 判定結果")
-            st.info("赤色：金額相違（右に正しい金額を表示） / グレー：①にデータ無し")
-            
-            # Pandas Stylerを使って表示
-            styled_df = final_view.style.apply(highlight_rows, axis=1)
-            
-            # 隠したい列（フラグ用）を非表示設定
-            styled_df = styled_df.hide(axis="columns", subset=['is_diff', 'is_new'])
-
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=800 # 表の高さを固定（スクロールで見やすく）
-            )
-            
-            # CSVダウンロード（フラグ列を除いて出力）
-            csv_data = final_view.drop(columns=['is_diff', 'is_new'])
-            st.download_button(
-                "結果をCSVでダウンロード",
-                csv_data.to_csv(index=False).encode('utf-8-sig'),
-                "check_result.csv"
-            )
+        if df_master.empty or

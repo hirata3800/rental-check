@@ -79,11 +79,10 @@ def extract_fixed_format(file):
                     # 1. まず行の中身をクリーニング
                     cleaned_row = [clean_text(cell) for cell in row if cell is not None]
                     
-                    # 2. 【重要】「完全に空っぽの列」をリストから削除して詰める
-                    # これで「1列目が空欄で、2列目にIDがある」ようなズレを補正します
+                    # 2. 「完全に空っぽの列」を削除して詰める
                     cleaned_row = [c for c in cleaned_row if c != ""]
                     
-                    # データが少なすぎる行（ゴミ行）はスキップ
+                    # データが少なすぎる行はスキップ
                     if len(cleaned_row) < 2:
                         continue
 
@@ -93,7 +92,6 @@ def extract_fixed_format(file):
                     
                     # === フィルター処理 ===
                     # キーの中に「数字6桁以上」が含まれていない行は無視する
-                    # (matchではなくsearchに変更して、前後に文字があっても拾えるように緩和)
                     if not re.search(r'\d{6,}', key):
                         continue
                     
@@ -133,10 +131,9 @@ if file_master and file_target:
         df_master = extract_fixed_format(file_master)
         df_target = extract_fixed_format(file_target)
 
-        # デバッグ用：もしデータが空なら警告を出す
+        # エラーハンドリング
         if df_master.empty or df_target.empty:
             st.error("有効なデータが見つかりませんでした。")
-            st.warning("ヒント: PDF内の表が画像として貼り付けられている場合は読み取れません。")
         else:
             # 2. 重複排除
             df_master = df_master.drop_duplicates(subset=['key'])
@@ -152,9 +149,7 @@ if file_master and file_target:
             )
             
             # 4. 判定ロジック
-            # 差異フラグ: ①にあるけど金額が違う
             merged['is_diff'] = (merged['amount_val'] != merged['amount_val_master']) & (merged['amount_val_master'].notna())
-            # 未登録フラグ: ①に存在しない
             merged['is_new'] = merged['amount_val_master'].isna()
             
             # 5. 表示用データの整形
@@ -192,11 +187,10 @@ if file_master and file_target:
             # Pandas Styler適用
             styled_df = final_view.style.apply(highlight_rows, axis=1)
             
-            # フラグ列を非表示
-            styled_df = styled_df.hide(axis="columns", subset=['is_diff', 'is_new'])
-
+            # 【ここが修正点】表示したい列だけを指定して、右2列（フラグ）を強制的に隠す
             st.dataframe(
                 styled_df,
+                column_order=['利用者名/ID', '請求額(②)', '正しい金額(①)'], 
                 use_container_width=True,
                 height=800
             )

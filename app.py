@@ -121,12 +121,9 @@ def extract_detailed_format(file):
                         if re.match(r'^\d{6,}', line) and '/' not in line:
                             user_id, user_name = split_id_name(line)
                             
-                            # === 【修正点】名前からサイクル文字を削除 ===
-                            # 名前の後ろに「6ヶ月」などがくっついている場合があるため、
-                            # 先ほど検出した cycle_text が名前に含まれていたら消す
+                            # === 名前からサイクル文字を削除 ===
                             if cycle_text and cycle_text in user_name:
                                 user_name = user_name.replace(cycle_text, "").strip()
-                            # ========================================
                             
                             current_record = {
                                 "id": user_id,
@@ -143,13 +140,11 @@ def extract_detailed_format(file):
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
                                 
-                                # サイクルそのものの文字は備考に入れない
                                 if line != cycle_text:
-                                    # 念のため、備考行の中にサイクル文字が混ざっていたら除去
                                     if cycle_text and cycle_text in line:
                                         line = line.replace(cycle_text, "").strip()
                                     
-                                    if line: # 空でなければ追加
+                                    if line:
                                         current_record["remarks"].append(line)
     
     data_list = []
@@ -205,12 +200,16 @@ if file_current and file_prev:
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
             # 5. 表示データ整形
-            def format_num(val):
-                return f"{int(val):,}" if pd.notnull(val) else ""
+            def format_curr(val):
+                return f"{int(val):,}" if pd.notnull(val) else "0"
+
+            def format_prev(val):
+                # ここで前回データがない場合は「該当なし」と表示
+                return f"{int(val):,}" if pd.notnull(val) else "該当なし"
 
             display_df = merged.copy()
-            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_num)
-            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_num)
+            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
+            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_prev)
             
             final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
@@ -231,12 +230,12 @@ if file_current and file_prev:
 
                 # 変更 -> 赤/青
                 if row['is_diff']:
-                    styles[0] = 'color: black;' # ID
-                    styles[1] = 'color: black;' # Name
-                    styles[2] = 'color: black;' # Cycle
-                    styles[3] = 'color: black;' # Remarks
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;' # 今回
-                    styles[5] = 'color: blue; font-weight: bold;' # 前回
+                    styles[0] = 'color: black;' 
+                    styles[1] = 'color: black;' 
+                    styles[2] = 'color: black;' 
+                    styles[3] = 'color: black;' 
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;' 
+                    styles[5] = 'color: blue; font-weight: bold;' 
                 
                 return styles
 

@@ -101,16 +101,14 @@ def extract_detailed_format(file):
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
-                    # === 【修正点】請求サイクルの抽出 (年対応) ===
+                    # === 請求サイクルの抽出 (年対応) ===
                     cycle_text = ""
                     for cell in non_empty_cells:
                         # "6ヶ月" または "1年" などのパターンを探す
-                        # \d+ (数字) + スペース(任意) + (ヶ月 または 年)
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
                         if match:
                             cycle_text = match.group(1) 
                             break
-                    # ============================================
 
                     lines = key_text_block.split('\n')
                     
@@ -122,6 +120,13 @@ def extract_detailed_format(file):
                         # ID行（新規レコード）
                         if re.match(r'^\d{6,}', line) and '/' not in line:
                             user_id, user_name = split_id_name(line)
+                            
+                            # === 【修正点】名前からサイクル文字を削除 ===
+                            # 名前の後ろに「6ヶ月」などがくっついている場合があるため、
+                            # 先ほど検出した cycle_text が名前に含まれていたら消す
+                            if cycle_text and cycle_text in user_name:
+                                user_name = user_name.replace(cycle_text, "").strip()
+                            # ========================================
                             
                             current_record = {
                                 "id": user_id,
@@ -138,8 +143,14 @@ def extract_detailed_format(file):
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
                                 
+                                # サイクルそのものの文字は備考に入れない
                                 if line != cycle_text:
-                                    current_record["remarks"].append(line)
+                                    # 念のため、備考行の中にサイクル文字が混ざっていたら除去
+                                    if cycle_text and cycle_text in line:
+                                        line = line.replace(cycle_text, "").strip()
+                                    
+                                    if line: # 空でなければ追加
+                                        current_record["remarks"].append(line)
     
     data_list = []
     for rec in extracted_records:

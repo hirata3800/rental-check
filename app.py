@@ -40,7 +40,6 @@ def clean_currency(x):
     """金額文字列を数値に変換"""
     if not isinstance(x, str):
         return 0
-    # 改行や記号を除去
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').replace('\n', '')
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
@@ -55,15 +54,13 @@ def clean_currency(x):
 def split_id_name(text):
     """IDと名前を分離する"""
     text = text.strip()
-    # "123456 名前" の形式を想定
     match = re.match(r'^(\d{6,})\s*(.*)', text)
     if match:
         return match.group(1), match.group(2).strip()
-    # マッチしない場合はそのまま返す
     return "", text
 
 def is_ignore_line(line):
-    """ヘッダーやページ番号など、無視すべき行か判定"""
+    """無視すべき行か判定"""
     line = line.strip()
     if not line: return True
     if "ページ" in line: return True
@@ -71,17 +68,15 @@ def is_ignore_line(line):
     if "未収金額" in line: return True
     if "利用者名" in line: return True
     if "請求額" in line: return True
-    # 日付だけの行も無視 (例: 2025/11/25)
     if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', line): return True
     return False
 
 def extract_detailed_format(file):
     """
-    ストリーム読み取り方式：
-    行ごとではなく、テキストの流れを見て「IDが出たら新規」「それ以外は直前の人の備考」と判定
+    ストリーム読み取り方式：ID、名前、請求サイクル、備考、金額を抽出
     """
     extracted_records = []
-    current_record = None # 現在処理中の人
+    current_record = None 
     
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
@@ -93,26 +88,30 @@ def extract_detailed_format(file):
             
             for table in tables:
                 for row in table:
-                    # 空行スキップ
                     if not any(row):
                         continue
                     
-                    # セルデータを取得（None対策）
                     cells = [str(cell) if cell is not None else "" for cell in row]
-                    
-                    # 1列目（ID/名前/備考が入る列）と、最後尾（金額列）を取得
-                    # 空のセルを除外して詰める
                     non_empty_cells = [c for c in cells if c.strip() != ""]
+                    
                     if not non_empty_cells:
                         continue
                         
-                    key_text_block = non_empty_cells[0] # ここにIDや名前、備考が入っている
+                    # 1列目: ID/名前/備考ブロック
+                    key_text_block = non_empty_cells[0]
+                    
+                    # 金額列: 最後尾
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
-                    
-                    # 金額の取得（ID行の金額を採用するため、ここで計算しておく）
                     amount_val = clean_currency(amount_str)
-                    
-                    # 1列目のセル内改行を分割して、1行ずつチェック
+
+                    # 請求サイクルの抽出 ("ヶ月"が含まれるセルを探す)
+                    cycle_text = ""
+                    for cell in non_empty_cells:
+                        if "ヶ月" in cell:
+                            cycle_text = cell.strip()
+                            break
+
+                    # 行内のテキストを解析
                     lines = key_text_block.split('\n')
                     
                     for line in lines:
@@ -120,38 +119,35 @@ def extract_detailed_format(file):
                         if is_ignore_line(line):
                             continue
                         
-                        # === ID行かどうかの判定 ===
-                        # 行の先頭が数字6桁以上であれば、新しい人の始まり
+                        # === ID行（新規レコード） ===
                         if re.match(r'^\d{6,}', line) and '/' not in line:
-                            
-                            # IDと名前に分離
                             user_id, user_name = split_id_name(line)
                             
-                            # 新しいレコードを作成
                             current_record = {
                                 "id": user_id,
                                 "name": user_name,
-                                "remarks": [],     # 備考はリストで溜める
-                                "amount_val": amount_val # 金額はこの行のものを使う
+                                "cycle": cycle_text, # サイクルを保存
+                                "remarks": [],
+                                "amount_val": amount_val
                             }
                             extracted_records.append(current_record)
                         
                         else:
-                            # === ID行ではない場合 ===
-                            # 直前に読み込んだ人がいれば、その人の備考として追加
+                            # === 備考行 ===
                             if current_record is not None:
                                 current_record["remarks"].append(line)
-                            else:
-                                # まだ誰も読み込んでいないのに文字がある（ヘッダーの残りなど）→無視
-                                pass
+                                # もしこの行でサイクルが見つかっていて、ID行で拾えていなかったら補完
+                                if not current_record["cycle"] and cycle_text:
+                                    current_record["cycle"] = cycle_text
     
-    # リスト形式をDataFrameに変換
+    # DataFrame化
     data_list = []
     for rec in extracted_records:
         data_list.append({
             "id": rec["id"],
             "name": rec["name"],
-            "remarks": " ".join(rec["remarks"]), # 備考リストを結合
+            "cycle": rec["cycle"],
+            "remarks": " ".join(rec["remarks"]),
             "amount_val": rec["amount_val"]
         })
 
@@ -183,7 +179,7 @@ if file_current and file_prev:
             df_current = df_current.drop_duplicates(subset=['id'])
             df_prev = df_prev.drop_duplicates(subset=['id'])
             
-            # 3. 今回(①)を基準に、前回(②)を結合 (Left Join)
+            # 3. 結合
             merged = pd.merge(
                 df_current, 
                 df_prev[['id', 'amount_val']], 
@@ -192,12 +188,12 @@ if file_current and file_prev:
                 suffixes=('_curr', '_prev')
             )
             
-            # 4. 判定ロジック
+            # 4. 判定フラグ作成
             merged['is_new'] = merged['amount_val_prev'].isna()
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
-            # 5. 表示用データの整形
+            # 5. 表示データ整形
             def format_num(val):
                 return f"{int(val):,}" if pd.notnull(val) else ""
 
@@ -205,8 +201,9 @@ if file_current and file_prev:
             display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_num)
             display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_num)
             
-            final_view = display_df[['id', 'name', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
-            final_view.columns = ['ID', '利用者名', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
+            # 列の順番定義 (サイクルを追加)
+            final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
+            final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
             # ==========================================
             # スタイリング
@@ -214,21 +211,22 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
-                # ケース1: 新規 -> 背景薄黄色
+                # 新規 -> 黄色
                 if row['is_new']:
                     return ['background-color: #ffffe0; color: black;'] * len(row)
                 
-                # ケース2: 一致 -> 文字色グレー
+                # 一致 -> グレー
                 if row['is_same']:
                     return ['color: #d3d3d3;'] * len(row)
 
-                # ケース3: 金額相違 -> 赤/青
+                # 変更 -> 赤/青
                 if row['is_diff']:
-                    styles[0] = 'color: black;' 
-                    styles[1] = 'color: black;' 
-                    styles[2] = 'color: black;' 
-                    styles[3] = 'color: red; font-weight: bold; background-color: #ffe6e6;' 
-                    styles[4] = 'color: blue; font-weight: bold;' 
+                    styles[0] = 'color: black;' # ID
+                    styles[1] = 'color: black;' # Name
+                    styles[2] = 'color: black;' # Cycle
+                    styles[3] = 'color: black;' # Remarks
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;' # 今回
+                    styles[5] = 'color: blue; font-weight: bold;' # 前回
                 
                 return styles
 
@@ -236,20 +234,20 @@ if file_current and file_prev:
             st.info("背景黄色：今回のみ(新規) / 文字グレー：前回と一致 / 赤青：金額変更")
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
-            
-            # フラグ列を非表示
-            styled_df = styled_df.hide(axis="columns", subset=['is_new', 'is_diff', 'is_same'])
 
+            # 【重要】右3列（フラグ）を隠して、必要な列だけを表示する設定
             st.dataframe(
                 styled_df,
                 use_container_width=True,
                 height=800,
                 column_config={
                     "ID": st.column_config.TextColumn("ID"),
-                }
+                },
+                column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
             
-            csv_data = final_view.drop(columns=['is_new', 'is_diff', 'is_same'])
+            # CSVも表示されている列だけをダウンロード
+            csv_data = final_view[['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']]
             st.download_button(
                 "結果をCSVでダウンロード",
                 csv_data.to_csv(index=False).encode('utf-8-sig'),

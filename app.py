@@ -6,6 +6,17 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
+# --- CSSハック: テーブルのヘッダーをクリック不可にする（並び替え防止） ---
+st.markdown("""
+    <style>
+    /* データフレームのヘッダー(th)のマウスイベントを無効化 */
+    div[data-testid="stDataFrame"] th {
+        pointer-events: none;
+        cursor: default;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- 簡易認証機能 ---
 def check_password():
     if "password_correct" not in st.session_state:
@@ -219,6 +230,7 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
+                # 新規 -> 白背景
                 if row['is_new']:
                     return styles
                 
@@ -242,19 +254,22 @@ if file_current and file_prev:
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
 
-            # --- 【修正点】並び替え防止のため st.table を使用 ---
-            # そのままだと長すぎるので、スクロール可能な枠(container)に入れます
-            with st.container(height=800):
-                # 右3列（フラグ）を隠す
-                styled_df_visible = styled_df.hide(axis="columns", subset=['is_new', 'is_diff', 'is_same'])
-                
-                # st.table は「静的なHTML表」を作るため、クリックしても並び変わりません
-                st.table(styled_df_visible)
-            # -----------------------------------------------
+            # 画面表示設定
+            # column_orderで表示したい列だけを指定（is_new等は隠れる）
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                height=800,
+                column_config={
+                    "ID": st.column_config.TextColumn("ID"),
+                },
+                column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
+            )
             
-            # CSVダウンロード
+            # CSVダウンロード設定
+            # hidden flags (is_new, is_diff, is_same) を含む全ての列を出力
             st.download_button(
-                "結果をCSVでダウンロード (全項目)",
+                "結果をCSVでダウンロード",
                 final_view.to_csv(index=False).encode('utf-8-sig'),
                 "check_result.csv"
             )

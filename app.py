@@ -219,9 +219,7 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
-                # 新規 (今回のみ) -> 色付けなし（デフォルト）
                 if row['is_new']:
-                    # 色指定を返さない = デフォルトの白背景/黒文字になります
                     return styles
                 
                 # 一致 -> 文字色グレー
@@ -244,19 +242,19 @@ if file_current and file_prev:
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
 
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=800,
-                column_config={
-                    "ID": st.column_config.TextColumn("ID"),
-                },
-                column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
-            )
+            # --- 【修正点】並び替え防止のため st.table を使用 ---
+            # そのままだと長すぎるので、スクロール可能な枠(container)に入れます
+            with st.container(height=800):
+                # 右3列（フラグ）を隠す
+                styled_df_visible = styled_df.hide(axis="columns", subset=['is_new', 'is_diff', 'is_same'])
+                
+                # st.table は「静的なHTML表」を作るため、クリックしても並び変わりません
+                st.table(styled_df_visible)
+            # -----------------------------------------------
             
-            csv_data = final_view[['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']]
+            # CSVダウンロード
             st.download_button(
-                "結果をCSVでダウンロード",
-                csv_data.to_csv(index=False).encode('utf-8-sig'),
+                "結果をCSVでダウンロード (全項目)",
+                final_view.to_csv(index=False).encode('utf-8-sig'),
                 "check_result.csv"
             )

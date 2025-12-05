@@ -55,15 +55,21 @@ def clean_currency(x):
         pass
     return 0
 
-def extract_fixed_format(file):
+def split_id_name(text):
+    """IDと名前を分離する (例: '000123 田中' -> '000123', '田中')"""
+    text = clean_text(text)
+    match = re.match(r'^(\d{6,})\s*(.*)', text)
+    if match:
+        return match.group(1), match.group(2)
+    return text, "" # 分離できない場合はIDにそのまま入れる
+
+def extract_detailed_format(file):
     """
-    固定フォーマット抽出（改良版）
-    - 空欄の列を自動でスキップして、ID（数字6桁以上）を探します
+    ID、名前、備考(次の行)、金額を抽出する
     """
     data_list = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # テキストベースで表を認識
             tables = page.extract_tables(table_settings={
                 "vertical_strategy": "text", 
                 "horizontal_strategy": "text",
@@ -71,44 +77,60 @@ def extract_fixed_format(file):
             })
             
             for table in tables:
-                for row in table:
+                # 行インデックスを使ってループ（次の行を見るため）
+                i = 0
+                while i < len(table):
+                    row = table[i]
+                    
                     # 空行スキップ
                     if not any(row):
+                        i += 1
                         continue
                         
-                    # 1. まず行の中身をクリーニング
                     cleaned_row = [clean_text(cell) for cell in row if cell is not None]
-                    
-                    # 2. 「完全に空っぽの列」を削除して詰める
                     cleaned_row = [c for c in cleaned_row if c != ""]
                     
-                    # データが少なすぎる行はスキップ
                     if len(cleaned_row) < 2:
+                        i += 1
                         continue
 
-                    # 3. 詰めた後の「先頭」をキー、「最後尾」を金額とする
-                    key = cleaned_row[0]
+                    # キー情報の取得
+                    key_raw = cleaned_row[0]
                     amount_str = cleaned_row[-1]
                     
-                    # === フィルター処理 ===
-                    # キーの中に「数字6桁以上」が含まれていない行は無視する
-                    if not re.search(r'\d{6,}', key):
-                        continue
+                    # === ID行の判定 ===
+                    # 先頭が「数字6桁以上」の場合、これをメイン行とみなす
+                    if re.search(r'^\d{6,}', key_raw) and '/' not in key_raw:
+                        
+                        # IDと名前に分割
+                        user_id, user_name = split_id_name(key_raw)
+                        amount_val = clean_currency(amount_str)
+                        
+                        # === 備考の取得（次の行を見る） ===
+                        remarks = ""
+                        if i + 1 < len(table):
+                            next_row = table[i+1]
+                            # 次の行をきれいにする
+                            next_row_clean = [clean_text(c) for c in next_row if c is not None and clean_text(c) != ""]
+                            
+                            # 次の行が存在し、かつ「次の行が別のID行ではない」場合、それを備考とする
+                            if next_row_clean:
+                                next_key = next_row_clean[0]
+                                if not re.search(r'^\d{6,}', next_key):
+                                    # 備考として採用
+                                    remarks = " ".join(next_row_clean)
+                                    # 備考行は処理したので、ループを1つ飛ばすかどうか？
+                                    # 通常は飛ばさなくて良い（次のループでID判定されてスキップされるため）が
+                                    # 安全のため読み捨ててもよい。ここでは読み捨てないでロジックに任せる
+                        
+                        data_list.append({
+                            "id": user_id,
+                            "name": user_name,
+                            "remarks": remarks,
+                            "amount_val": amount_val
+                        })
                     
-                    # 日付(スラッシュ入り)がキーになってしまっている場合は除外
-                    if '/' in key:
-                        continue
-                    # ==================================
-
-                    # 金額変換
-                    amount_val = clean_currency(amount_str)
-                    
-                    # リストに追加
-                    data_list.append({
-                        "key": key,
-                        "amount_raw": amount_str, # 表示用の元の文字列
-                        "amount_val": amount_val  # 計算用の数値
-                    })
+                    i += 1
 
     return pd.DataFrame(data_list)
 
@@ -117,86 +139,108 @@ def extract_fixed_format(file):
 # ==========================================
 
 st.title('📄 レンタル伝票 差異チェックツール')
-st.caption("利用者IDと名前の行のみを自動抽出して比較します")
+st.caption("①今回分を基準に、②前回分と比較します。")
 
 col1, col2 = st.columns(2)
 with col1:
-    file_master = st.file_uploader("① 正しいデータ (Master)", type="pdf", key="m")
+    file_current = st.file_uploader("① 今回請求分 (Current)", type="pdf", key="m")
 with col2:
-    file_target = st.file_uploader("② 確認したいデータ (Target)", type="pdf", key="t")
+    file_prev = st.file_uploader("② 前回請求分 (Previous)", type="pdf", key="t")
 
-if file_master and file_target:
+if file_current and file_prev:
     with st.spinner('比較中...'):
         # 1. データ抽出
-        df_master = extract_fixed_format(file_master)
-        df_target = extract_fixed_format(file_target)
+        df_current = extract_detailed_format(file_current)
+        df_prev = extract_detailed_format(file_prev)
 
-        # エラーハンドリング
-        if df_master.empty or df_target.empty:
+        if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
         else:
             # 2. 重複排除
-            df_master = df_master.drop_duplicates(subset=['key'])
-            df_target = df_target.drop_duplicates(subset=['key'])
+            df_current = df_current.drop_duplicates(subset=['id'])
+            df_prev = df_prev.drop_duplicates(subset=['id'])
             
-            # 3. ②(Target)をベースに、①(Master)を結合
+            # 3. 今回(①)を基準に、前回(②)を結合 (Left Join)
             merged = pd.merge(
-                df_target, 
-                df_master[['key', 'amount_val']], 
-                on='key', 
+                df_current, 
+                df_prev[['id', 'amount_val']], 
+                on='id', 
                 how='left', 
-                suffixes=('', '_master')
+                suffixes=('_curr', '_prev')
             )
             
             # 4. 判定ロジック
-            merged['is_diff'] = (merged['amount_val'] != merged['amount_val_master']) & (merged['amount_val_master'].notna())
-            merged['is_new'] = merged['amount_val_master'].isna()
+            # 前回データがない(NaN) -> 新規
+            merged['is_new'] = merged['amount_val_prev'].isna()
             
+            # 金額が違う (かつ新規ではない) -> 差異あり
+            merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
+            
+            # 金額が同じ -> 一致
+            merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
+
             # 5. 表示用データの整形
+            # 表示用に数値をカンマ区切り文字列に、Noneは空文字に
+            def format_num(val):
+                return f"{int(val):,}" if pd.notnull(val) else ""
+
             display_df = merged.copy()
+            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_num)
+            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_num)
             
-            # 「正しい金額(①)」列を作る
-            display_df['correct_val'] = display_df.apply(
-                lambda row: f"{int(row['amount_val_master']):,}" if row['is_diff'] else "", axis=1
-            )
-            
-            # 表示列の整理
-            final_view = display_df[['key', 'amount_raw', 'correct_val', 'is_diff', 'is_new']].copy()
-            final_view.columns = ['利用者名/ID', '請求額(②)', '正しい金額(①)', 'is_diff', 'is_new']
+            # 列の並び替え
+            final_view = display_df[['id', 'name', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
+            final_view.columns = ['ID', '利用者名', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
             # ==========================================
-            # スタイリング
+            # スタイリング (色の設定)
             # ==========================================
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
-                # ケース2: ①になくて②にある行
+                # ケース1: ①にあって②にない (新規) -> 行全体を薄黄色
                 if row['is_new']:
-                    return ['background-color: #f0f0f0; color: #a0a0a0; text-decoration: line-through;'] * len(row)
+                    return ['background-color: #ffffe0; color: black;'] * len(row)
                 
-                # ケース1: 金額不一致
+                # ケース2: 比較結果が同じ -> 行全体をグレーアウト(文字色グレー)
+                if row['is_same']:
+                    return ['color: #d3d3d3;'] * len(row)
+
+                # ケース3: 金額相違 -> 今回を赤、前回を青
                 if row['is_diff']:
-                    styles[1] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                    styles[2] = 'color: blue; font-weight: bold;'
+                    # ID, 名前, 備考は黒
+                    styles[0] = 'color: black;'
+                    styles[1] = 'color: black;'
+                    styles[2] = 'color: black;'
+                    # 今回請求額(Col 3) -> 赤
+                    styles[3] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
+                    # 前回請求額(Col 4) -> 青
+                    styles[4] = 'color: blue; font-weight: bold;'
                 
                 return styles
 
             st.markdown("### 判定結果")
-            st.info("赤色：金額相違（右に正しい金額を表示） / グレー：①にデータ無し")
+            st.info("背景黄色：今回のみ(新規) / 文字グレー：前回と一致 / 赤青：金額変更")
             
             # Pandas Styler適用
             styled_df = final_view.style.apply(highlight_rows, axis=1)
             
-            # 【ここが修正点】表示したい列だけを指定して、右2列（フラグ）を強制的に隠す
+            # フラグ列を非表示
+            styled_df = styled_df.hide(axis="columns", subset=['is_new', 'is_diff', 'is_same'])
+
+            # データフレーム表示
+            # Streamlitのdataframeはデフォルトでセル選択→Ctrl+Cが可能です
             st.dataframe(
                 styled_df,
-                column_order=['利用者名/ID', '請求額(②)', '正しい金額(①)'], 
                 use_container_width=True,
-                height=800
+                height=800,
+                column_config={
+                    "ID": st.column_config.TextColumn("ID"), # 数字として扱わない(カンマなし)
+                }
             )
             
             # CSVダウンロード
-            csv_data = final_view.drop(columns=['is_diff', 'is_new'])
+            csv_data = final_view.drop(columns=['is_new', 'is_diff', 'is_same'])
             st.download_button(
                 "結果をCSVでダウンロード",
                 csv_data.to_csv(index=False).encode('utf-8-sig'),

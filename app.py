@@ -142,4 +142,125 @@ def extract_detailed_format(file):
                                 # ただし日付などは除外しないといけないが、備考の一部かもしれないので含める
                                 if not re.search(r'^\d{6,}', next_key):
                                     # 改行を除去して結合
-                                    cleaned_next_text = " ".join
+                                    cleaned_next_text = " ".join(next_row_clean).replace('\n', ' ')
+                                    remarks_list.append(cleaned_next_text)
+                                    # 備考行として処理したので、備考行として消費した分をスキップするか？
+                                    # 今回は「次のループでID判定して弾かれる」のでそのままでOK
+                        
+                        # 備考リストを結合
+                        full_remarks = " / ".join(remarks_list)
+                        
+                        data_list.append({
+                            "id": user_id,
+                            "name": user_name,
+                            "remarks": full_remarks,
+                            "amount_val": amount_val
+                        })
+                    
+                    i += 1
+
+    return pd.DataFrame(data_list)
+
+# ==========================================
+# アプリ画面
+# ==========================================
+
+st.title('📄 レンタル伝票 差異チェックツール')
+st.caption("①今回分を基準に、②前回分と比較します。")
+
+col1, col2 = st.columns(2)
+with col1:
+    file_current = st.file_uploader("① 今回請求分 (Current)", type="pdf", key="m")
+with col2:
+    file_prev = st.file_uploader("② 前回請求分 (Previous)", type="pdf", key="t")
+
+if file_current and file_prev:
+    with st.spinner('比較中...'):
+        # 1. データ抽出
+        df_current = extract_detailed_format(file_current)
+        df_prev = extract_detailed_format(file_prev)
+
+        if df_current.empty or df_prev.empty:
+            st.error("有効なデータが見つかりませんでした。")
+        else:
+            # 2. 重複排除
+            df_current = df_current.drop_duplicates(subset=['id'])
+            df_prev = df_prev.drop_duplicates(subset=['id'])
+            
+            # 3. 今回(①)を基準に、前回(②)を結合 (Left Join)
+            merged = pd.merge(
+                df_current, 
+                df_prev[['id', 'amount_val']], 
+                on='id', 
+                how='left', 
+                suffixes=('_curr', '_prev')
+            )
+            
+            # 4. 判定ロジック
+            # 前回データがない(NaN) -> 新規
+            merged['is_new'] = merged['amount_val_prev'].isna()
+            
+            # 金額が違う (かつ新規ではない) -> 差異あり
+            merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
+            
+            # 金額が同じ -> 一致
+            merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
+
+            # 5. 表示用データの整形
+            def format_num(val):
+                return f"{int(val):,}" if pd.notnull(val) else ""
+
+            display_df = merged.copy()
+            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_num)
+            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_num)
+            
+            final_view = display_df[['id', 'name', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
+            final_view.columns = ['ID', '利用者名', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
+
+            # ==========================================
+            # スタイリング
+            # ==========================================
+            def highlight_rows(row):
+                styles = [''] * len(row)
+                
+                # ケース1: ①にあって②にない (新規) -> 行全体を薄黄色
+                if row['is_new']:
+                    return ['background-color: #ffffe0; color: black;'] * len(row)
+                
+                # ケース2: 比較結果が同じ -> 行全体をグレーアウト
+                if row['is_same']:
+                    return ['color: #d3d3d3;'] * len(row)
+
+                # ケース3: 金額相違 -> 今回を赤、前回を青
+                if row['is_diff']:
+                    styles[0] = 'color: black;' # ID
+                    styles[1] = 'color: black;' # Name
+                    styles[2] = 'color: black;' # Remarks
+                    styles[3] = 'color: red; font-weight: bold; background-color: #ffe6e6;' # 今回
+                    styles[4] = 'color: blue; font-weight: bold;' # 前回
+                
+                return styles
+
+            st.markdown("### 判定結果")
+            st.info("背景黄色：今回のみ(新規) / 文字グレー：前回と一致 / 赤青：金額変更")
+            
+            styled_df = final_view.style.apply(highlight_rows, axis=1)
+            
+            # フラグ列を非表示
+            styled_df = styled_df.hide(axis="columns", subset=['is_new', 'is_diff', 'is_same'])
+
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                height=800,
+                column_config={
+                    "ID": st.column_config.TextColumn("ID"),
+                }
+            )
+            
+            csv_data = final_view.drop(columns=['is_new', 'is_diff', 'is_same'])
+            st.download_button(
+                "結果をCSVでダウンロード",
+                csv_data.to_csv(index=False).encode('utf-8-sig'),
+                "check_result.csv"
+            )

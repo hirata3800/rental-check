@@ -31,24 +31,20 @@ if not check_password():
 # ==========================================
 
 def clean_text(text):
-    """改行をスペースに置換してトリム（改行を消さない）"""
+    """テキストのクリーニング"""
     if text is None:
         return ""
-    # 改行を消さずに残す（あとで分離するため）、ただし前後の空白は消す
     return str(text).strip()
 
 def clean_currency(x):
     """金額文字列を数値に変換"""
     if not isinstance(x, str):
         return 0
-    # 改行が含まれている場合、数値っぽいものを探す
-    # カンマ、円、スペースを除去
+    # 改行や記号を除去
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').replace('\n', '')
-    # 全角数字を半角に変換
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
     try:
-        # 数値部分を抽出
         match = re.search(r'-?\d+', s)
         if match:
             return int(match.group())
@@ -58,18 +54,35 @@ def clean_currency(x):
 
 def split_id_name(text):
     """IDと名前を分離する"""
-    # 余計な空白を除去
     text = text.strip()
+    # "123456 名前" の形式を想定
     match = re.match(r'^(\d{6,})\s*(.*)', text)
     if match:
         return match.group(1), match.group(2).strip()
-    return text, ""
+    # マッチしない場合はそのまま返す
+    return "", text
+
+def is_ignore_line(line):
+    """ヘッダーやページ番号など、無視すべき行か判定"""
+    line = line.strip()
+    if not line: return True
+    if "ページ" in line: return True
+    if "請求サイクル" in line: return True
+    if "未収金額" in line: return True
+    if "利用者名" in line: return True
+    if "請求額" in line: return True
+    # 日付だけの行も無視 (例: 2025/11/25)
+    if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', line): return True
+    return False
 
 def extract_detailed_format(file):
     """
-    ID、名前、備考(セル内改行 + 次の行)、金額を抽出する
+    ストリーム読み取り方式：
+    行ごとではなく、テキストの流れを見て「IDが出たら新規」「それ以外は直前の人の備考」と判定
     """
-    data_list = []
+    extracted_records = []
+    current_record = None # 現在処理中の人
+    
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables(table_settings={
@@ -79,85 +92,68 @@ def extract_detailed_format(file):
             })
             
             for table in tables:
-                i = 0
-                while i < len(table):
-                    row = table[i]
-                    
+                for row in table:
                     # 空行スキップ
                     if not any(row):
-                        i += 1
                         continue
                     
-                    # 生のセルデータを取得（Noneは空文字に）
-                    raw_cells = [str(cell) if cell is not None else "" for cell in row]
+                    # セルデータを取得（None対策）
+                    cells = [str(cell) if cell is not None else "" for cell in row]
                     
-                    # 完全に空の列を詰める処理
-                    non_empty_cells = [c for c in raw_cells if c.strip() != ""]
-                    
-                    if len(non_empty_cells) < 2:
-                        i += 1
+                    # 1列目（ID/名前/備考が入る列）と、最後尾（金額列）を取得
+                    # 空のセルを除外して詰める
+                    non_empty_cells = [c for c in cells if c.strip() != ""]
+                    if not non_empty_cells:
                         continue
-
-                    # キー情報の取得（一番左の列）
-                    key_raw_text = non_empty_cells[0]
-                    amount_str = non_empty_cells[-1]
+                        
+                    key_text_block = non_empty_cells[0] # ここにIDや名前、備考が入っている
+                    amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     
-                    # === ID行の判定 ===
-                    # セル内のどこかに「数字6桁以上」が含まれているか？
-                    # 改行で区切られている可能性があるので、行ごとにチェック
-                    lines = key_raw_text.split('\n')
+                    # 金額の取得（ID行の金額を採用するため、ここで計算しておく）
+                    amount_val = clean_currency(amount_str)
                     
-                    # IDが含まれる行を探す（通常は1行目）
-                    id_line_index = -1
-                    for idx, line in enumerate(lines):
-                        if re.search(r'^\d{6,}', line.strip()) and '/' not in line:
-                            id_line_index = idx
-                            break
+                    # 1列目のセル内改行を分割して、1行ずつチェック
+                    lines = key_text_block.split('\n')
                     
-                    if id_line_index != -1:
-                        # === IDと名前の抽出 ===
-                        target_line = lines[id_line_index]
-                        user_id, user_name = split_id_name(target_line)
+                    for line in lines:
+                        line = line.strip()
+                        if is_ignore_line(line):
+                            continue
                         
-                        # === 備考の抽出 ①（同じセル内の改行） ===
-                        # ID行より後ろにある行はすべて「備考」とみなす
-                        in_cell_remarks = []
-                        if id_line_index + 1 < len(lines):
-                            in_cell_remarks = lines[id_line_index+1:]
-                        
-                        remarks_list = [r.strip() for r in in_cell_remarks if r.strip()]
-                        
-                        amount_val = clean_currency(amount_str)
-                        
-                        # === 備考の抽出 ②（次の行を見る） ===
-                        # 次のテーブル行を見て、ID行でなければ備考として追加
-                        if i + 1 < len(table):
-                            next_row = table[i+1]
-                            # 次の行をきれいにする
-                            next_row_clean = [str(c).strip() for c in next_row if c is not None and str(c).strip() != ""]
+                        # === ID行かどうかの判定 ===
+                        # 行の先頭が数字6桁以上であれば、新しい人の始まり
+                        if re.match(r'^\d{6,}', line) and '/' not in line:
                             
-                            if next_row_clean:
-                                next_key = next_row_clean[0]
-                                # 次の行の先頭がID（数字6桁）でなければ、それは備考行
-                                # ただし日付などは除外しないといけないが、備考の一部かもしれないので含める
-                                if not re.search(r'^\d{6,}', next_key):
-                                    # 改行を除去して結合
-                                    cleaned_next_text = " ".join(next_row_clean).replace('\n', ' ')
-                                    remarks_list.append(cleaned_next_text)
-                                    # 備考行として処理したので、備考行として消費した分をスキップするか？
-                                    # 今回は「次のループでID判定して弾かれる」のでそのままでOK
+                            # IDと名前に分離
+                            user_id, user_name = split_id_name(line)
+                            
+                            # 新しいレコードを作成
+                            current_record = {
+                                "id": user_id,
+                                "name": user_name,
+                                "remarks": [],     # 備考はリストで溜める
+                                "amount_val": amount_val # 金額はこの行のものを使う
+                            }
+                            extracted_records.append(current_record)
                         
-                        # 備考リストを結合
-                        full_remarks = " / ".join(remarks_list)
-                        
-                        data_list.append({
-                            "id": user_id,
-                            "name": user_name,
-                            "remarks": full_remarks,
-                            "amount_val": amount_val
-                        })
-                    
-                    i += 1
+                        else:
+                            # === ID行ではない場合 ===
+                            # 直前に読み込んだ人がいれば、その人の備考として追加
+                            if current_record is not None:
+                                current_record["remarks"].append(line)
+                            else:
+                                # まだ誰も読み込んでいないのに文字がある（ヘッダーの残りなど）→無視
+                                pass
+    
+    # リスト形式をDataFrameに変換
+    data_list = []
+    for rec in extracted_records:
+        data_list.append({
+            "id": rec["id"],
+            "name": rec["name"],
+            "remarks": " ".join(rec["remarks"]), # 備考リストを結合
+            "amount_val": rec["amount_val"]
+        })
 
     return pd.DataFrame(data_list)
 
@@ -197,13 +193,8 @@ if file_current and file_prev:
             )
             
             # 4. 判定ロジック
-            # 前回データがない(NaN) -> 新規
             merged['is_new'] = merged['amount_val_prev'].isna()
-            
-            # 金額が違う (かつ新規ではない) -> 差異あり
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
-            
-            # 金額が同じ -> 一致
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
             # 5. 表示用データの整形
@@ -223,21 +214,21 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
-                # ケース1: ①にあって②にない (新規) -> 行全体を薄黄色
+                # ケース1: 新規 -> 背景薄黄色
                 if row['is_new']:
                     return ['background-color: #ffffe0; color: black;'] * len(row)
                 
-                # ケース2: 比較結果が同じ -> 行全体をグレーアウト
+                # ケース2: 一致 -> 文字色グレー
                 if row['is_same']:
                     return ['color: #d3d3d3;'] * len(row)
 
-                # ケース3: 金額相違 -> 今回を赤、前回を青
+                # ケース3: 金額相違 -> 赤/青
                 if row['is_diff']:
-                    styles[0] = 'color: black;' # ID
-                    styles[1] = 'color: black;' # Name
-                    styles[2] = 'color: black;' # Remarks
-                    styles[3] = 'color: red; font-weight: bold; background-color: #ffe6e6;' # 今回
-                    styles[4] = 'color: blue; font-weight: bold;' # 前回
+                    styles[0] = 'color: black;' 
+                    styles[1] = 'color: black;' 
+                    styles[2] = 'color: black;' 
+                    styles[3] = 'color: red; font-weight: bold; background-color: #ffe6e6;' 
+                    styles[4] = 'color: blue; font-weight: bold;' 
                 
                 return styles
 

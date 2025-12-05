@@ -104,7 +104,6 @@ def extract_detailed_format(file):
                     # === 請求サイクルの抽出 (年対応) ===
                     cycle_text = ""
                     for cell in non_empty_cells:
-                        # "6ヶ月" または "1年" などのパターンを探す
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
                         if match:
                             cycle_text = match.group(1) 
@@ -121,7 +120,7 @@ def extract_detailed_format(file):
                         if re.match(r'^\d{6,}', line) and '/' not in line:
                             user_id, user_name = split_id_name(line)
                             
-                            # === 名前からサイクル文字を削除 ===
+                            # 名前からサイクル文字を削除
                             if cycle_text and cycle_text in user_name:
                                 user_name = user_name.replace(cycle_text, "").strip()
                             
@@ -204,7 +203,7 @@ if file_current and file_prev:
                 return f"{int(val):,}" if pd.notnull(val) else "0"
 
             def format_prev(val):
-                # ここで前回データがない場合は「該当なし」と表示
+                # 前回データがない場合は「該当なし」と表示
                 return f"{int(val):,}" if pd.notnull(val) else "該当なし"
 
             display_df = merged.copy()
@@ -220,11 +219,12 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = [''] * len(row)
                 
-                # 新規 -> 黄色
+                # 新規 (今回のみ) -> 色付けなし（デフォルト）
                 if row['is_new']:
-                    return ['background-color: #ffffe0; color: black;'] * len(row)
+                    # 色指定を返さない = デフォルトの白背景/黒文字になります
+                    return styles
                 
-                # 一致 -> グレー
+                # 一致 -> 文字色グレー
                 if row['is_same']:
                     return ['color: #d3d3d3;'] * len(row)
 
@@ -240,7 +240,7 @@ if file_current and file_prev:
                 return styles
 
             st.markdown("### 判定結果")
-            st.info("背景黄色：今回のみ(新規) / 文字グレー：前回と一致 / 赤青：金額変更")
+            st.info("文字グレー：前回と一致 / 赤青：金額変更")
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
 

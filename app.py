@@ -6,10 +6,9 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- CSSハック: テーブルのヘッダーをクリック不可にする（並び替え防止） ---
+# --- CSSハック: ヘッダーの並び替え無効化 ---
 st.markdown("""
     <style>
-    /* データフレームのヘッダー(th)のマウスイベントを無効化 */
     div[data-testid="stDataFrame"] th {
         pointer-events: none;
         cursor: default;
@@ -42,36 +41,27 @@ if not check_password():
 # ==========================================
 
 def clean_text(text):
-    """テキストのクリーニング"""
-    if text is None:
-        return ""
+    if text is None: return ""
     return str(text).strip()
 
 def clean_currency(x):
-    """金額文字列を数値に変換"""
-    if not isinstance(x, str):
-        return 0
+    if not isinstance(x, str): return 0
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').replace('\n', '')
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
     try:
         match = re.search(r'-?\d+', s)
-        if match:
-            return int(match.group())
-    except:
-        pass
+        if match: return int(match.group())
+    except: pass
     return 0
 
 def split_id_name(text):
-    """IDと名前を分離する"""
     text = text.strip()
     match = re.match(r'^(\d{6,})\s*(.*)', text)
-    if match:
-        return match.group(1), match.group(2).strip()
+    if match: return match.group(1), match.group(2).strip()
     return "", text
 
 def is_ignore_line(line):
-    """無視すべき行か判定"""
     line = line.strip()
     if not line: return True
     if "ページ" in line: return True
@@ -83,9 +73,6 @@ def is_ignore_line(line):
     return False
 
 def extract_detailed_format(file):
-    """
-    ストリーム読み取り方式
-    """
     extracted_records = []
     current_record = None 
     
@@ -99,20 +86,16 @@ def extract_detailed_format(file):
             
             for table in tables:
                 for row in table:
-                    if not any(row):
-                        continue
+                    if not any(row): continue
                     
                     cells = [str(cell) if cell is not None else "" for cell in row]
                     non_empty_cells = [c for c in cells if c.strip() != ""]
-                    
-                    if not non_empty_cells:
-                        continue
+                    if not non_empty_cells: continue
                         
                     key_text_block = non_empty_cells[0]
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
-                    # === 請求サイクルの抽出 (年対応) ===
                     cycle_text = ""
                     for cell in non_empty_cells:
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
@@ -121,17 +104,12 @@ def extract_detailed_format(file):
                             break
 
                     lines = key_text_block.split('\n')
-                    
                     for line in lines:
                         line = line.strip()
-                        if is_ignore_line(line):
-                            continue
+                        if is_ignore_line(line): continue
                         
-                        # ID行（新規レコード）
                         if re.match(r'^\d{6,}', line) and '/' not in line:
                             user_id, user_name = split_id_name(line)
-                            
-                            # 名前からサイクル文字を削除
                             if cycle_text and cycle_text in user_name:
                                 user_name = user_name.replace(cycle_text, "").strip()
                             
@@ -143,17 +121,13 @@ def extract_detailed_format(file):
                                 "amount_val": amount_val
                             }
                             extracted_records.append(current_record)
-                        
                         else:
-                            # 備考行
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
-                                
                                 if line != cycle_text:
                                     if cycle_text and cycle_text in line:
                                         line = line.replace(cycle_text, "").strip()
-                                    
                                     if line:
                                         current_record["remarks"].append(line)
     
@@ -166,7 +140,6 @@ def extract_detailed_format(file):
             "remarks": " ".join(rec["remarks"]),
             "amount_val": rec["amount_val"]
         })
-
     return pd.DataFrame(data_list)
 
 # ==========================================
@@ -184,18 +157,15 @@ with col2:
 
 if file_current and file_prev:
     with st.spinner('比較中...'):
-        # 1. データ抽出
         df_current = extract_detailed_format(file_current)
         df_prev = extract_detailed_format(file_prev)
 
         if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
         else:
-            # 2. 重複排除
             df_current = df_current.drop_duplicates(subset=['id'])
             df_prev = df_prev.drop_duplicates(subset=['id'])
             
-            # 3. 結合
             merged = pd.merge(
                 df_current, 
                 df_prev[['id', 'amount_val']], 
@@ -204,17 +174,15 @@ if file_current and file_prev:
                 suffixes=('_curr', '_prev')
             )
             
-            # 4. 判定フラグ
+            # フラグ設定
             merged['is_new'] = merged['amount_val_prev'].isna()
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
-            # 5. 表示データ整形
+            # 表示用フォーマット
             def format_curr(val):
                 return f"{int(val):,}" if pd.notnull(val) else "0"
-
             def format_prev(val):
-                # 前回データがない場合は「該当なし」と表示
                 return f"{int(val):,}" if pd.notnull(val) else "該当なし"
 
             display_df = merged.copy()
@@ -225,37 +193,47 @@ if file_current and file_prev:
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
             # ==========================================
-            # スタイリング
+            # スタイリング (ここを修正しました)
             # ==========================================
             def highlight_rows(row):
-                styles = [''] * len(row)
+                # 1. デフォルト: 白背景・黒文字
+                bg_color = 'white'
+                text_color = 'black'
                 
-                # 新規 -> 白背景
+                # 2. 備考に「◆請◆」があれば行全体を黄色に
+                if '◆請◆' in str(row['備考']):
+                    bg_color = '#ffffcc' # 薄い黄色
+                
+                # 行全体の基本スタイルを作成
+                base_style = f'background-color: {bg_color}; color: {text_color};'
+                styles = [base_style] * len(row)
+                
+                # 3. 新規 (前回データなし)
                 if row['is_new']:
-                    return styles
+                    # 「今回請求額」(列4) を赤字・ピンク背景 (強調)
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
                 
-                # 一致 -> 文字色グレー
-                if row['is_same']:
-                    return ['color: #d3d3d3;'] * len(row)
+                # 4. 金額一致
+                elif row['is_same']:
+                    # 金額列 (列4, 5) のみ文字色をグレーに (背景色は黄色のまま維持)
+                    grey_style = f'color: #a0a0a0; background-color: {bg_color};'
+                    styles[4] = grey_style
+                    styles[5] = grey_style
 
-                # 変更 -> 赤/青
-                if row['is_diff']:
-                    styles[0] = 'color: black;' 
-                    styles[1] = 'color: black;' 
-                    styles[2] = 'color: black;' 
-                    styles[3] = 'color: black;' 
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;' 
-                    styles[5] = 'color: blue; font-weight: bold;' 
+                # 5. 金額相違
+                elif row['is_diff']:
+                    # 今回 (列4): 赤字・ピンク背景
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
+                    # 前回 (列5): 青字・太字 (背景は行の色を継承)
+                    styles[5] = f'color: blue; font-weight: bold; background-color: {bg_color};'
                 
                 return styles
 
             st.markdown("### 判定結果")
-            st.info("文字グレー：前回と一致 / 赤青：金額変更")
+            st.caption("備考に「◆請◆」あり：黄色 / 新規・変更：赤背景 / 一致：金額グレー")
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
 
-            # 画面表示設定
-            # column_orderで表示したい列だけを指定（is_new等は隠れる）
             st.dataframe(
                 styled_df,
                 use_container_width=True,
@@ -266,10 +244,19 @@ if file_current and file_prev:
                 column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
             
-            # CSVダウンロード設定
-            # hidden flags (is_new, is_diff, is_same) を含む全ての列を出力
             st.download_button(
-                "結果をCSVでダウンロード",
+                "結果をCSVでダウンロード (全項目)",
                 final_view.to_csv(index=False).encode('utf-8-sig'),
                 "check_result.csv"
             )
+
+            # IDコピーパネル
+            st.divider()
+            st.subheader("📋 IDコピー用パネル")
+            copy_list = final_view['ID'] + " : " + final_view['利用者名']
+            selected_entry = st.selectbox("IDをコピーしたい人を選択", copy_list)
+            if selected_entry:
+                target_id = selected_entry.split(" : ")[0]
+                c1, c2 = st.columns([1, 4])
+                with c1: st.write("右のアイコンでコピー ➡")
+                with c2: st.code(target_id, language=None)

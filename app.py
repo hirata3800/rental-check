@@ -6,63 +6,19 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- 【最強版】画面の余計な表示を消すCSS設定 ---
+# --- UI非表示設定 ---
 st.markdown("""
     <style>
-    /* 1. ヘッダー（ハンバーガーメニュー等）を消す */
-    header {
+    header, footer, [data-testid="stHeader"], [data-testid="stToolbar"], .stAppDeployButton {
         display: none !important;
         visibility: hidden !important;
     }
-    [data-testid="stHeader"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    
-    /* 2. ツールバーとデコレーションを消す */
-    [data-testid="stToolbar"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    [data-testid="stDecoration"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    
-    /* 3. デプロイボタン（Manage app）を消す */
-    .stAppDeployButton {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    [data-testid="stAppDeployButton"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    
-    /* 4. プロフィール等のバッジを消す */
-    div[class*="viewerBadge"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    [data-testid="stViewerBadge"] {
-        display: none !important;
-    }
-
-    /* 5. フッターを消す */
-    footer {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    
-    /* 6. コンテンツ上部の余白を詰める */
-    .block-container {
-        padding-top: 1rem !important;
-    }
-    
-    /* 7. テーブルのヘッダーをクリック不可にする（並び替え防止） */
     div[data-testid="stDataFrame"] th {
         pointer-events: none !important;
         cursor: default !important;
+    }
+    .block-container {
+        padding-top: 1rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -91,10 +47,6 @@ if not check_password():
 # データ処理機能
 # ==========================================
 
-def clean_text(text):
-    if text is None: return ""
-    return str(text).strip()
-
 def clean_currency(x):
     if not isinstance(x, str): return 0
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').replace('\n', '')
@@ -105,12 +57,6 @@ def clean_currency(x):
         if match: return int(match.group())
     except: pass
     return 0
-
-def split_id_name(text):
-    text = text.strip()
-    match = re.match(r'^(\d{6,})\s*(.*)', text)
-    if match: return match.group(1), match.group(2).strip()
-    return "", text
 
 def is_ignore_line(line):
     line = line.strip()
@@ -147,6 +93,7 @@ def extract_detailed_format(file):
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
+                    # サイクル抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
@@ -159,29 +106,36 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # === 【修正点】ID行かどうかの厳格な判定 ===
+                        # === 【重要】ID行の判定ロジック ===
                         is_user_line = False
                         
-                        # 条件1: 数字6桁以上で始まっていること
-                        if re.match(r'^\d{6,}', line) and '/' not in line:
-                            is_user_line = True
+                        # 1. まず数字6桁以上で始まっているか
+                        match = re.match(r'^(\d{6,})(.*)', line)
+                        
+                        if match and '/' not in line:
+                            user_id = match.group(1)
+                            rest_text = match.group(2) # IDの後ろの文字
                             
-                            # 条件2: 【重要】IDの直後にスペースがない場合は、備考（他人のID参照）とみなして除外
-                            # 例: "0100143486藤吉様..." -> スペース無し -> False
-                            # 例: "0000011158 黒崎誠" -> スペース有り -> True
-                            if not re.match(r'^\d{6,}[ \t　]', line):
-                                is_user_line = False
+                            # 2. IDの直後に「スペース」があるか確認
+                            # 備考欄のID参照は「0100...藤吉様」のようにスペース無しで続くことが多い
+                            has_space = re.match(r'^[\s\u3000\t]', rest_text)
                             
-                            # 条件3: 親族関係を示すキーワードが含まれていたら、スペースがあっても除外
+                            # 3. 名前部分に「除外キーワード」が含まれていないか確認
+                            # これが含まれていれば、ID行ではなく「備考」とみなす
                             ignore_keywords = ["様の", "の奥様", "のご主人", "の旦那", "回収", "集金", "(亡)", "（亡）", "同時", "義母", "義父"]
-                            if any(kw in line for kw in ignore_keywords):
-                                is_user_line = False
+                            contains_ignore_word = any(kw in rest_text for kw in ignore_keywords)
+                            
+                            # 判定: スペースがあり、かつ除外キーワードがない場合のみ「利用者」とする
+                            if has_space and (not contains_ignore_word):
+                                is_user_line = True
+                                user_name = rest_text.strip()
+                                
+                                # 名前からサイクル文字を削除
+                                if cycle_text and cycle_text in user_name:
+                                    user_name = user_name.replace(cycle_text, "").strip()
 
                         if is_user_line:
-                            user_id, user_name = split_id_name(line)
-                            if cycle_text and cycle_text in user_name:
-                                user_name = user_name.replace(cycle_text, "").strip()
-                            
+                            # 新しい利用者として登録
                             current_record = {
                                 "id": user_id,
                                 "name": user_name,
@@ -191,12 +145,14 @@ def extract_detailed_format(file):
                             }
                             extracted_records.append(current_record)
                         else:
-                            # ID行とみなされなかった場合（備考行）
+                            # 備考行として処理
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
                                 
+                                # サイクル文字そのものでなければ備考に追加
                                 if line != cycle_text:
+                                    # 備考の中にサイクル文字が混ざっていたら消す
                                     if cycle_text and cycle_text in line:
                                         line = line.replace(cycle_text, "").strip()
                                     if line:
@@ -277,21 +233,15 @@ if file_current and file_prev:
                 base_style = f'background-color: {bg_color}; color: {text_color};'
                 styles = [base_style] * len(row)
                 
-                # 新規
                 if row['is_new']:
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                
-                # 一致
                 elif row['is_same']:
                     grey_style = f'color: #a0a0a0; background-color: {bg_color};'
                     styles[4] = grey_style
                     styles[5] = grey_style
-
-                # 相違
                 elif row['is_diff']:
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
                     styles[5] = f'color: blue; font-weight: bold; background-color: {bg_color};'
-                
                 return styles
 
             st.markdown("### 判定結果")

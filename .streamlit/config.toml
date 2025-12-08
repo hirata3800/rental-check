@@ -1,3 +1,6 @@
 [client]
-toolbarMode = "viewer"
-showErrorDetails = false
+toolbarMode = "viewer"  # ツールバーを隠す
+showErrorDetails = false # エラー詳細を隠す
+
+[ui]
+hideTopBar = true  # 上部のバーを隠す

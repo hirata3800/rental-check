@@ -141,6 +141,9 @@ if not cur_file:
 with st.spinner("PDF解析中..."):
 
     cur_rows_raw = extract_rows_from_pdf(BytesIO(cur_file.read()))
+
+    st.write("抽出された行データ（今回）:", cur_rows_raw[:50])
+    
     df_current = parse_rows(cur_rows_raw)
 
     if prev_file:
@@ -219,3 +222,4 @@ st.download_button(
     display.to_csv(index=False).encode("utf-8-sig"),
     "check_result.csv"
 )
+

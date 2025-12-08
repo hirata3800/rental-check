@@ -6,12 +6,26 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- CSSハック: ヘッダーの並び替え無効化 ---
+# --- 【修正点】画面の余計な表示を消す設定 ---
 st.markdown("""
     <style>
+    /* 1. ヘッダー（右上のFork, GitHub, 三点リーダー）を消す */
+    header {visibility: hidden;}
+    .stAppHeader {display: none;}
+    
+    /* 2. フッター（右下のManage app, Made with Streamlit）を消す */
+    footer {visibility: hidden;}
+    .stAppDeployButton {display: none;}
+    
+    /* 3. テーブルのタイトル行をクリック不可にする（並び替え防止） */
     div[data-testid="stDataFrame"] th {
         pointer-events: none;
         cursor: default;
+    }
+    
+    /* 画面上部の余白を詰める（ヘッダーを消した分） */
+    .block-container {
+        padding-top: 2rem;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -193,38 +207,32 @@ if file_current and file_prev:
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
             # ==========================================
-            # スタイリング (ここを修正しました)
+            # スタイリング
             # ==========================================
             def highlight_rows(row):
-                # 1. デフォルト: 白背景・黒文字
                 bg_color = 'white'
                 text_color = 'black'
                 
-                # 2. 備考に「◆請◆」があれば行全体を黄色に
+                # 備考に「◆請◆」があれば行全体を黄色に
                 if '◆請◆' in str(row['備考']):
-                    bg_color = '#ffffcc' # 薄い黄色
+                    bg_color = '#ffffcc'
                 
-                # 行全体の基本スタイルを作成
                 base_style = f'background-color: {bg_color}; color: {text_color};'
                 styles = [base_style] * len(row)
                 
-                # 3. 新規 (前回データなし)
+                # 新規
                 if row['is_new']:
-                    # 「今回請求額」(列4) を赤字・ピンク背景 (強調)
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
                 
-                # 4. 金額一致
+                # 一致
                 elif row['is_same']:
-                    # 金額列 (列4, 5) のみ文字色をグレーに (背景色は黄色のまま維持)
                     grey_style = f'color: #a0a0a0; background-color: {bg_color};'
                     styles[4] = grey_style
                     styles[5] = grey_style
 
-                # 5. 金額相違
+                # 相違
                 elif row['is_diff']:
-                    # 今回 (列4): 赤字・ピンク背景
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                    # 前回 (列5): 青字・太字 (背景は行の色を継承)
                     styles[5] = f'color: blue; font-weight: bold; background-color: {bg_color};'
                 
                 return styles

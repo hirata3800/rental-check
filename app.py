@@ -159,14 +159,25 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # === 【修正点】ID判定ロジックの厳格化 ===
-                        # 「数字6桁以上」の直後に「スペース(半角or全角)」がある場合のみ、新しい利用者とみなす。
-                        # これにより "0100143486藤吉様..." のようなスペース無しの備考行を除外できます。
-                        is_new_user_line = False
-                        if re.match(r'^\d{6,}[ \t　]+', line) and '/' not in line:
-                             is_new_user_line = True
+                        # === 【修正点】ID行かどうかの厳格な判定 ===
+                        is_user_line = False
                         
-                        if is_new_user_line:
+                        # 条件1: 数字6桁以上で始まっていること
+                        if re.match(r'^\d{6,}', line) and '/' not in line:
+                            is_user_line = True
+                            
+                            # 条件2: 【重要】IDの直後にスペースがない場合は、備考（他人のID参照）とみなして除外
+                            # 例: "0100143486藤吉様..." -> スペース無し -> False
+                            # 例: "0000011158 黒崎誠" -> スペース有り -> True
+                            if not re.match(r'^\d{6,}[ \t　]', line):
+                                is_user_line = False
+                            
+                            # 条件3: 親族関係を示すキーワードが含まれていたら、スペースがあっても除外
+                            ignore_keywords = ["様の", "の奥様", "のご主人", "の旦那", "回収", "集金", "(亡)", "（亡）", "同時", "義母", "義父"]
+                            if any(kw in line for kw in ignore_keywords):
+                                is_user_line = False
+
+                        if is_user_line:
                             user_id, user_name = split_id_name(line)
                             if cycle_text and cycle_text in user_name:
                                 user_name = user_name.replace(cycle_text, "").strip()
@@ -180,10 +191,11 @@ def extract_detailed_format(file):
                             }
                             extracted_records.append(current_record)
                         else:
-                            # IDで始まっていてもスペースがなければ、備考として追加される
+                            # ID行とみなされなかった場合（備考行）
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
+                                
                                 if line != cycle_text:
                                     if cycle_text and cycle_text in line:
                                         line = line.replace(cycle_text, "").strip()

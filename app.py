@@ -50,22 +50,18 @@ if not check_password():
 def clean_currency(x):
     """金額文字列を数値に変換"""
     if not isinstance(x, str): return 0
-    # 改行がある場合は1行目のみ評価
     if '\n' in x: x = x.split('\n')[0]
     
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
     try:
-        # 数字以外の文字が混ざりすぎていないかチェック（ID誤認防止）
-        # 純粋な数値パターンだけを探す
-        match = re.search(r'^-?\d+$', s) # 完全一致に近い形のみ許可
-        if not match:
-            # カンマ区切りの数値を探す
+        # 数字以外の文字が含まれていないかチェック（IDや日付の誤認防止）
+        # 「1,000」や「-500」のような純粋な数値形式のみ許可
+        if re.match(r'^-?[\d,]+$', s):
             match = re.search(r'-?\d+', s)
-        
-        if match:
-            return int(match.group())
+            if match: return int(match.group())
+        return 0 # 数値以外が混ざっていたら金額0とみなす
     except: pass
     return 0
 
@@ -81,7 +77,7 @@ def is_ignore_line(line):
     return False
 
 def extract_detailed_format(file):
-    data_list = []
+    raw_records = []
     current_record = None 
     
     with pdfplumber.open(file) as pdf:
@@ -96,109 +92,111 @@ def extract_detailed_format(file):
                 for row in table:
                     if not any(row): continue
                     
-                    # セルの中身（テキスト）を結合して取得
                     cells = [str(cell).strip() if cell is not None else "" for cell in row]
                     non_empty_cells = [c for c in cells if c]
                     
                     if not non_empty_cells: continue
                     
-                    # サイクル文字の抽出
-                    cycle_text = ""
-                    for cell in non_empty_cells:
-                        if re.search(r'\d+\s*(?:ヶ月|年)', cell):
-                            cycle_text = cell
-                            break
-
-                    # ========================================================
-                    # 【判定ロジック 1】 列数チェック
-                    # 2列未満（ID列しかない等）の場合は、金額列なし＝備考とみなす
-                    # ========================================================
+                    # 金額取得
+                    # 2列未満なら金額なしとみなす
                     if len(non_empty_cells) < 2:
                         amount_val = 0
                     else:
                         amount_str = non_empty_cells[-1] 
                         amount_val = clean_currency(amount_str)
-
-                    # テキストブロック解析
+                    
+                    cycle_text = ""
+                    for cell in non_empty_cells:
+                        if re.search(r'\d+\s*(?:ヶ月|年)', cell):
+                            cycle_text = cell
+                            break
+                    
                     key_text_block = non_empty_cells[0]
                     lines = key_text_block.split('\n')
                     
-                    # ========================================================
-                    # 【判定ロジック 2】 行の処理
-                    # ========================================================
-                    
-                    # --- ケースA: 金額が0円（または列不足）の場合 ---
-                    # この行は絶対に利用者ではない。備考確定。
+                    # --- 行処理ロジック ---
+                    # 金額が0なら、この行は全て備考
                     if amount_val == 0:
                         if current_record:
                             for line in lines:
                                 line = line.strip()
                                 if is_ignore_line(line): continue
-                                
                                 if cycle_text and cycle_text in line:
                                     line = line.replace(cycle_text, "").strip()
                                 if line:
                                     current_record["remarks"].append(line)
                         continue
 
-                    # --- ケースB: 金額がある場合（利用者行の可能性が高い） ---
-                    user_found_in_this_row = False
+                    # 金額がある場合、利用者を探す
+                    user_found = False
                     
                     for line in lines:
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # IDパターンチェック
                         match = re.match(r'^(\d{6,})(.*)', line)
                         
-                        if match and '/' not in line:
+                        if match and not user_found and '/' not in line:
                             user_id = match.group(1)
                             user_name = match.group(2).strip()
                             
-                            # 【重要】NGキーワードチェック（ここを最強にしました）
-                            # 本来の氏名に「様」や「（」は絶対に入らない。これがあれば100%備考。
-                            # 「奥」「主」などは苗字にある可能性があるので「奥様」「主人」で判定
-                            ng_keywords = [
-                                "様", "奥様", "主人", "旦那", "回収", "集金", "亡", "同時", "義母", "義父", 
-                                "（", "(", "→", "別", "居宅"
-                            ]
+                            if cycle_text and cycle_text in user_name:
+                                user_name = user_name.replace(cycle_text, "").strip()
                             
-                            has_ng = any(kw in user_name for kw in ng_keywords)
-                            
-                            # NGワードがなく、かつこの行でまだ誰も登録していない場合
-                            if not has_ng and not user_found_in_this_row:
-                                # ★正規の利用者として登録★
-                                if cycle_text and cycle_text in user_name:
-                                    user_name = user_name.replace(cycle_text, "").strip()
-                                
-                                current_record = {
-                                    "id": user_id,
-                                    "name": user_name,
-                                    "cycle": cycle_text, 
-                                    "remarks": [],
-                                    "amount_val": amount_val
-                                }
-                                data_list.append(current_record)
-                                user_found_in_this_row = True
-                            else:
-                                # NGワード入り or 2人目のID は備考へ
-                                if current_record:
-                                    if cycle_text and cycle_text in line:
-                                        line = line.replace(cycle_text, "").strip()
-                                    current_record["remarks"].append(line)
-                        
+                            # 一旦レコード作成（後でフィルタリング）
+                            current_record = {
+                                "id": user_id,
+                                "name": user_name,
+                                "cycle": cycle_text, 
+                                "remarks": [],
+                                "amount_val": amount_val
+                            }
+                            raw_records.append(current_record)
+                            user_found = True
                         else:
-                            # IDでない行はすべて備考へ
+                            # 備考
                             if current_record:
                                 if cycle_text and cycle_text in line:
                                     line = line.replace(cycle_text, "").strip()
-                                if line != cycle_text: 
+                                if line:
                                     current_record["remarks"].append(line)
-    
-    # DataFrame化
+
+    # ========================================================
+    # 【最終フィルター】 不正なレコードをここで抹殺する
+    # ========================================================
     final_data = []
-    for rec in data_list:
-        final_data.append({
+    ng_keywords = ["様", "奥", "主", "夫", "妻", "娘", "息", "族", "親", "亡", "集", "回", "同", "→", "(", "（", "【", "「", "介", "施"]
+
+    # 1つ前のレコード（備考結合用）
+    prev_valid_record = None
+
+    for rec in raw_records:
+        # チェック1: 金額が0円なら除外
+        if rec["amount_val"] == 0:
+            is_valid = False
+        else:
+            # チェック2: 名前にNGワードが含まれていたら除外
+            has_ng = any(kw in rec["name"] for kw in ng_keywords)
+            is_valid = not has_ng
+
+        if is_valid:
+            # 合格！リストに追加
+            final_data.append(rec)
+            prev_valid_record = rec
+        else:
+            # 不合格（備考行だった）
+            # もし前の有効なレコードがあれば、そこに情報を備考として追記してあげる
+            if prev_valid_record:
+                # 名前部分を備考として追加
+                invalid_text = f"{rec['id']} {rec['name']}"
+                prev_valid_record["remarks"].append(invalid_text)
+                # この行にあった備考も追加
+                prev_valid_record["remarks"].extend(rec["remarks"])
+
+    # DataFrame化
+    df_data = []
+    for rec in final_data:
+        df_data.append({
             "id": rec["id"],
             "name": rec["name"],
             "cycle": rec["cycle"],
@@ -206,7 +204,7 @@ def extract_detailed_format(file):
             "amount_val": rec["amount_val"]
         })
         
-    return pd.DataFrame(final_data)
+    return pd.DataFrame(df_data)
 
 # ==========================================
 # アプリ画面

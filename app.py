@@ -6,42 +6,51 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- 【最強版】画面の余計な表示を消す設定 ---
+# --- 【最強版】画面の余計な表示を消すCSS設定 ---
 st.markdown("""
     <style>
-    /* 1. ヘッダー全体（ハンバーガーメニュー、Deployボタン、Running manなど全て）を消す */
+    /* 1. ヘッダー（ハンバーガーメニュー、Running man等）を消す */
     header {
+        display: none !important;
         visibility: hidden !important;
-        height: 0px !important;
     }
     
-    /* 2. 特定のツールバーや装飾バーも念のため消す */
-    [data-testid="stHeader"] {
-        visibility: hidden !important;
-        display: none !important;
-    }
+    /* 2. ツールバー（右上のオプション）を消す */
     [data-testid="stToolbar"] {
-        visibility: hidden !important;
         display: none !important;
+        visibility: hidden !important;
     }
+    
+    /* 3. デプロイボタン（Manage app）をクラス名指定で消す */
+    .stAppDeployButton {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    /* 4. デプロイボタン（ID指定）でも消す */
+    [data-testid="stAppDeployButton"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+
+    /* 5. ヘッダーの装飾ラインを消す */
     [data-testid="stDecoration"] {
-        visibility: hidden !important;
         display: none !important;
+        visibility: hidden !important;
     }
-    
-    /* 3. フッター（Made with Streamlit）を消す */
+
+    /* 6. フッターを消す */
     footer {
-        visibility: hidden !important;
         display: none !important;
-        height: 0px !important;
+        visibility: hidden !important;
     }
     
-    /* 4. ヘッダーを消した分の上の空白を詰める */
+    /* 7. コンテンツ上部の余白を詰める */
     .block-container {
-        padding-top: 0rem !important;
+        padding-top: 1rem !important;
     }
     
-    /* 5. テーブルのヘッダーをクリック不可にする（並び替え防止） */
+    /* 8. テーブルのヘッダーをクリック不可にする（並び替え防止） */
     div[data-testid="stDataFrame"] th {
         pointer-events: none !important;
         cursor: default !important;

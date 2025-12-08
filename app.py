@@ -6,56 +6,63 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- 【完全ステルス版】画面の管理ボタン等を全削除するCSS設定 ---
+# --- 【最強版】画面の余計な表示を消すCSS設定 ---
 st.markdown("""
     <style>
-    /* 1. ヘッダー（上のバー全体）を消す */
+    /* 1. ヘッダー（ハンバーガーメニュー等）を消す */
     header {
+        display: none !important;
         visibility: hidden !important;
-        height: 0px !important;
     }
     [data-testid="stHeader"] {
         display: none !important;
-    }
-    
-    /* 2. フッター（下のバー全体）を消す */
-    footer {
         visibility: hidden !important;
-        display: none !important;
-        height: 0px !important;
     }
     
-    /* 3. 【重要】右下の「Manage app」や「プロフィール」の塊（ViewerBadge）を消す */
-    /* クラス名に "viewerBadge" が含まれる要素をすべて消す */
+    /* 2. ツールバーとデコレーションを消す */
+    [data-testid="stToolbar"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    [data-testid="stDecoration"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    /* 3. デプロイボタン（Manage app）を消す */
+    .stAppDeployButton {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    [data-testid="stAppDeployButton"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    /* 4. プロフィール等のバッジを消す */
     div[class*="viewerBadge"] {
         display: none !important;
         visibility: hidden !important;
     }
-    
-    /* 念のためID指定でも消す */
     [data-testid="stViewerBadge"] {
         display: none !important;
     }
-    
-    /* 4. デプロイボタン単体も消す */
-    .stAppDeployButton {
-        display: none !important;
-    }
-    
-    /* 5. ツールバー（右上のオプション）を消す */
-    [data-testid="stToolbar"] {
-        display: none !important;
-    }
 
-    /* 6. テーブルのヘッダーをクリック不可にする（並び替え防止） */
+    /* 5. フッターを消す */
+    footer {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    
+    /* 6. コンテンツ上部の余白を詰める */
+    .block-container {
+        padding-top: 1rem !important;
+    }
+    
+    /* 7. テーブルのヘッダーをクリック不可にする（並び替え防止） */
     div[data-testid="stDataFrame"] th {
         pointer-events: none !important;
         cursor: default !important;
-    }
-    
-    /* 7. 上部の余白を詰める */
-    .block-container {
-        padding-top: 1rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -152,7 +159,14 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        if re.match(r'^\d{6,}', line) and '/' not in line:
+                        # === 【修正点】ID判定ロジックの厳格化 ===
+                        # 「数字6桁以上」の直後に「スペース(半角or全角)」がある場合のみ、新しい利用者とみなす。
+                        # これにより "0100143486藤吉様..." のようなスペース無しの備考行を除外できます。
+                        is_new_user_line = False
+                        if re.match(r'^\d{6,}[ \t　]+', line) and '/' not in line:
+                             is_new_user_line = True
+                        
+                        if is_new_user_line:
                             user_id, user_name = split_id_name(line)
                             if cycle_text and cycle_text in user_name:
                                 user_name = user_name.replace(cycle_text, "").strip()
@@ -166,6 +180,7 @@ def extract_detailed_format(file):
                             }
                             extracted_records.append(current_record)
                         else:
+                            # IDで始まっていてもスペースがなければ、備考として追加される
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text

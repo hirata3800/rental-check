@@ -6,54 +6,56 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- 【最強版】画面の余計な表示を消すCSS設定 ---
+# --- 【完全ステルス版】画面の管理ボタン等を全削除するCSS設定 ---
 st.markdown("""
     <style>
-    /* 1. ヘッダー（ハンバーガーメニュー、Running man等）を消す */
+    /* 1. ヘッダー（上のバー全体）を消す */
     header {
+        visibility: hidden !important;
+        height: 0px !important;
+    }
+    [data-testid="stHeader"] {
+        display: none !important;
+    }
+    
+    /* 2. フッター（下のバー全体）を消す */
+    footer {
+        visibility: hidden !important;
+        display: none !important;
+        height: 0px !important;
+    }
+    
+    /* 3. 【重要】右下の「Manage app」や「プロフィール」の塊（ViewerBadge）を消す */
+    /* クラス名に "viewerBadge" が含まれる要素をすべて消す */
+    div[class*="viewerBadge"] {
         display: none !important;
         visibility: hidden !important;
     }
     
-    /* 2. ツールバー（右上のオプション）を消す */
-    [data-testid="stToolbar"] {
+    /* 念のためID指定でも消す */
+    [data-testid="stViewerBadge"] {
         display: none !important;
-        visibility: hidden !important;
     }
     
-    /* 3. デプロイボタン（Manage app）をクラス名指定で消す */
+    /* 4. デプロイボタン単体も消す */
     .stAppDeployButton {
         display: none !important;
-        visibility: hidden !important;
     }
     
-    /* 4. デプロイボタン（ID指定）でも消す */
-    [data-testid="stAppDeployButton"] {
+    /* 5. ツールバー（右上のオプション）を消す */
+    [data-testid="stToolbar"] {
         display: none !important;
-        visibility: hidden !important;
     }
 
-    /* 5. ヘッダーの装飾ラインを消す */
-    [data-testid="stDecoration"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-
-    /* 6. フッターを消す */
-    footer {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    
-    /* 7. コンテンツ上部の余白を詰める */
-    .block-container {
-        padding-top: 1rem !important;
-    }
-    
-    /* 8. テーブルのヘッダーをクリック不可にする（並び替え防止） */
+    /* 6. テーブルのヘッダーをクリック不可にする（並び替え防止） */
     div[data-testid="stDataFrame"] th {
         pointer-events: none !important;
         cursor: default !important;
+    }
+    
+    /* 7. 上部の余白を詰める */
+    .block-container {
+        padding-top: 1rem !important;
     }
     </style>
 """, unsafe_allow_html=True)

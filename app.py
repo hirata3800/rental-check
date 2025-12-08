@@ -3,15 +3,12 @@ import pdfplumber
 import pandas as pd
 import re
 
-# --- ページ設定 ---
+# --- ページ設定 & UI非表示 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
-
-# --- UI非表示設定 ---
 st.markdown("""
     <style>
     header, footer, [data-testid="stHeader"], [data-testid="stToolbar"], .stAppDeployButton {
         display: none !important;
-        visibility: hidden !important;
     }
     div[data-testid="stDataFrame"] th {
         pointer-events: none !important;
@@ -47,45 +44,26 @@ if not check_password():
 # データ処理機能
 # ==========================================
 
-def get_amount_from_line(text):
-    """行の末尾や文中にある金額を取得する"""
-    # 1. まず日付っぽい数字を隠す (2025年, 9/1, 11月など)
-    # これにより金額誤認を防ぐ
-    masked_text = re.sub(r'\d{4}年', '', text)
-    masked_text = re.sub(r'\d{1,2}/\d{1,2}', '', masked_text)
-    masked_text = re.sub(r'\d{1,2}月', '', masked_text)
-    
-    # 2. 金額パターンを探す (カンマ付き、または「円」の前)
-    # 行の「最後」に出てくる数値を金額として優先採用する
-    # パターン: 1,200 または 1200
-    matches = re.findall(r'(\d{1,3}(?:,\d{3})*)', masked_text)
-    
-    if matches:
-        # 後ろから順番にチェック
-        for m in reversed(matches):
-            val_str = m.replace(',', '')
-            if not val_str: continue
-            try:
-                val = int(val_str)
-                # ID(6桁以上)と混同しないよう、かつ0円ではないもの
-                # ※IDも数値だが、文脈的にIDは行頭で処理済みのはず。
-                # ここでは「ID以外の数値」かつ「0より大きい」ものを探す
-                if 0 < val < 10000000: # 1000万未満を金額とみなす(IDはもっと大きい)
-                    return val
-            except:
-                continue
-    return 0
+def clean_currency(x):
+    """金額文字列を数値に変換"""
+    if not x: return 0
+    # 「1,200」のような文字を「1200」に変換
+    s = str(x).replace(',', '').replace('円', '').replace('¥', '').strip()
+    try:
+        return int(s)
+    except:
+        return 0
 
 def extract_text_mode(file):
     """
-    PDFをテキストとして読み込み、行ごとのパターンで解析する
+    PDFを見たままの「テキスト」として読み込み、行ごとのパターンで解析する
     """
     all_records = []
     current_record = None
     
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # extract_text() を使用して、見たままのテキストを取得
+            # extract_text() で「見たままの文字列」を取得
             text = page.extract_text()
             if not text:
                 continue
@@ -95,84 +73,67 @@ def extract_text_mode(file):
             for line in lines:
                 line = line.strip()
                 if not line: continue
+                # ヘッダー行などはスキップ
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line:
                     continue
 
                 # ========================================================
-                # 【判定ロジック】
-                # 1. IDで始まっているか？
-                # 2. その行に「金額」があるか？
-                #    YES -> 新しい利用者
-                #    NO  -> 備考 (IDで始まっていても金額がなければ備考)
+                # 【新・判定ロジック】
+                # お客様の提示データ: "0000011158 黒﨑誠 7,200"
+                # ルール: [数字6桁以上] [スペース] [名前] [スペース] [金額]
                 # ========================================================
                 
-                # IDパターン (行頭の数字)
-                id_match = re.match(r'^(\d{6,})', line)
+                # 正規表現で行末の金額を探す
+                # ^(\d{6,})   : 行頭に6桁以上の数字(ID)
+                # \s+         : 空白
+                # (.*?)       : 名前 (途中の文字)
+                # \s+         : 空白
+                # ([\d,]+)$   : 行末に「数字とカンマ」だけの塊 (金額)
                 
-                is_new_user = False
-                amount_val = 0
+                match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
                 
-                if id_match:
-                    user_id = id_match.group(1)
-                    # IDを除いた残りのテキスト
-                    remaining_text = line[len(user_id):].strip()
+                if match:
+                    # パターンに完全一致 = 「利用者行」確定
+                    user_id = match.group(1)
+                    user_name = match.group(2).strip()
+                    amount_str = match.group(3)
+                    amount_val = clean_currency(amount_str)
                     
-                    # 金額を探す
-                    amount_val = get_amount_from_line(remaining_text)
-                    
-                    # 金額があれば利用者確定
+                    # 念のため金額が0より大きいか確認
                     if amount_val > 0:
-                        is_new_user = True
-                        
-                        # 名前とサイクルの分離
-                        # remaining_text には "黒崎誠 7,200" や "山崎和雄 6ヶ月 10,800" が入っている
-                        
-                        # まず金額文字を消す(一番後ろの数字)
-                        amount_str_match = re.search(r'(\d{1,3}(?:,\d{3})*)\s*$', remaining_text)
-                        if amount_str_match:
-                            target_amt = amount_str_match.group(1)
-                            # 金額と一致していれば消す
-                            if int(target_amt.replace(',','')) == amount_val:
-                                remaining_text = remaining_text[:amount_str_match.start()].strip()
-                        
-                        # サイクルを探す
-                        cycle_text = ""
-                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', remaining_text)
-                        if cycle_match:
-                            cycle_text = cycle_match.group(1)
-                            # 名前からサイクルを消す
-                            remaining_text = remaining_text.replace(cycle_text, "").strip()
-                        
-                        user_name = remaining_text.strip()
-                        
-                        # レコード作成
+                        # 新しい利用者を作成
                         current_record = {
                             "id": user_id,
                             "name": user_name,
-                            "cycle": cycle_text,
+                            "cycle": "",
                             "remarks": [],
                             "amount_val": amount_val
                         }
                         all_records.append(current_record)
-                    
                     else:
-                        # IDで始まっているが金額がない -> 備考行 (例: 0100143486藤吉様の奥様)
+                        # 金額が0なら備考扱い
                         if current_record:
                             current_record["remarks"].append(line)
                 
                 else:
-                    # IDで始まらない行 -> 備考 または サイクルのみの行
+                    # パターンに一致しない行 = 「備考」または「サイクル」
+                    # 例: "0100143486藤吉様の奥様..." (行末に金額がないのでマッチしない)
+                    # 例: "6ヶ月"
+                    # 例: "軽度対象者..."
+                    
                     if current_record:
-                        # サイクルのみの行かチェック ("6ヶ月" だけなど)
-                        if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
-                            # もし利用者のサイクルがまだ空ならセット、そうでなければ無視(重複)
+                        # "6ヶ月" のようなサイクル行かチェック
+                        if re.search(r'\d+\s*(?:ヶ月|年)', line):
+                            # 既にサイクルが入っていなければ登録、入っていればそれは備考の中の文字かも
                             if not current_record["cycle"]:
-                                current_record["cycle"] = line
+                                current_record["cycle"] = line.strip()
+                            else:
+                                current_record["remarks"].append(line)
                         else:
-                            # 純粋な備考
+                            # 純粋な備考行
                             current_record["remarks"].append(line)
 
-    # データフレーム化
+    # DataFrame化
     data_list = []
     for rec in all_records:
         data_list.append({
@@ -207,9 +168,11 @@ if file_current and file_prev:
         if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
         else:
+            # 重複排除
             df_current = df_current.drop_duplicates(subset=['id'])
             df_prev = df_prev.drop_duplicates(subset=['id'])
             
+            # 結合
             merged = pd.merge(
                 df_current, 
                 df_prev[['id', 'amount_val']], 
@@ -218,10 +181,12 @@ if file_current and file_prev:
                 suffixes=('_curr', '_prev')
             )
             
+            # 判定
             merged['is_new'] = merged['amount_val_prev'].isna()
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
+            # 表示整形
             def format_curr(val):
                 return f"{int(val):,}" if pd.notnull(val) else "0"
             def format_prev(val):
@@ -234,30 +199,21 @@ if file_current and file_prev:
             final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
+            # 色付け
             def highlight_rows(row):
-                bg_color = 'white'
-                text_color = 'black'
+                styles = ['color: black'] * len(row)
                 
-                # 備考に「◆請◆」があれば行全体を黄色に
-                if '◆請◆' in str(row['備考']):
-                    bg_color = '#ffffcc'
-                
-                base_style = f'background-color: {bg_color}; color: {text_color};'
-                styles = [base_style] * len(row)
-                
-                if row['is_new']:
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                elif row['is_same']:
-                    grey_style = f'color: #a0a0a0; background-color: {bg_color};'
-                    styles[4] = grey_style
-                    styles[5] = grey_style
+                if row['is_same']:
+                    styles = ['color: #d3d3d3'] * len(row)
                 elif row['is_diff']:
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                    styles[5] = f'color: blue; font-weight: bold; background-color: {bg_color};'
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
+                    styles[5] = 'color: blue; font-weight: bold'
+                # 新規は黒文字のまま
+                
                 return styles
 
             st.markdown("### 判定結果")
-            st.caption("備考に「◆請◆」あり：黄色 / 新規・変更：赤背景 / 一致：金額グレー")
+            st.caption("文字グレー：前回と一致 / 赤青：金額変更")
             
             styled_df = final_view.style.apply(highlight_rows, axis=1)
 
@@ -265,14 +221,12 @@ if file_current and file_prev:
                 styled_df,
                 use_container_width=True,
                 height=800,
-                column_config={
-                    "ID": st.column_config.TextColumn("ID"),
-                },
+                column_config={"ID": st.column_config.TextColumn("ID")},
                 column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
             
             st.download_button(
-                "結果をCSVでダウンロード (全項目)",
+                "結果をCSVでダウンロード",
                 final_view.to_csv(index=False).encode('utf-8-sig'),
                 "check_result.csv"
             )

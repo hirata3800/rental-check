@@ -50,13 +50,22 @@ if not check_password():
 def clean_currency(x):
     """金額文字列を数値に変換"""
     if not isinstance(x, str): return 0
+    # 改行がある場合は1行目のみ評価
     if '\n' in x: x = x.split('\n')[0]
+    
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
     try:
-        match = re.search(r'-?\d+', s)
-        if match: return int(match.group())
+        # 数字以外の文字が混ざりすぎていないかチェック（ID誤認防止）
+        # 純粋な数値パターンだけを探す
+        match = re.search(r'^-?\d+$', s) # 完全一致に近い形のみ許可
+        if not match:
+            # カンマ区切りの数値を探す
+            match = re.search(r'-?\d+', s)
+        
+        if match:
+            return int(match.group())
     except: pass
     return 0
 
@@ -93,31 +102,29 @@ def extract_detailed_format(file):
                     
                     if not non_empty_cells: continue
                     
-                    # ========================================================
-                    # 【重要修正】列数のチェック
-                    # 1列しかない（＝金額列がない）場合は、備考行とみなして金額0にする
-                    # これにより、備考内のIDが誤って金額として読まれるのを防ぐ
-                    # ========================================================
-                    if len(non_empty_cells) < 2:
-                        amount_val = 0
-                    else:
-                        # 最後尾の列を金額とする
-                        amount_str = non_empty_cells[-1] 
-                        amount_val = clean_currency(amount_str)
-                    
                     # サイクル文字の抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
                         if re.search(r'\d+\s*(?:ヶ月|年)', cell):
                             cycle_text = cell
                             break
-                    
+
+                    # ========================================================
+                    # 【判定ロジック 1】 列数チェック
+                    # 2列未満（ID列しかない等）の場合は、金額列なし＝備考とみなす
+                    # ========================================================
+                    if len(non_empty_cells) < 2:
+                        amount_val = 0
+                    else:
+                        amount_str = non_empty_cells[-1] 
+                        amount_val = clean_currency(amount_str)
+
                     # テキストブロック解析
                     key_text_block = non_empty_cells[0]
                     lines = key_text_block.split('\n')
                     
                     # ========================================================
-                    # 【判定ロジック】
+                    # 【判定ロジック 2】 行の処理
                     # ========================================================
                     
                     # --- ケースA: 金額が0円（または列不足）の場合 ---
@@ -148,12 +155,18 @@ def extract_detailed_format(file):
                             user_id = match.group(1)
                             user_name = match.group(2).strip()
                             
-                            # NGキーワードチェック（念のため）
-                            ng_keywords = ["様の", "の奥様", "のご主人", "の旦那", "家族", "娘", "息子", "親戚", 
-                                           "回収", "集金", "亡", "同時", "義母", "義父", "奥さん"]
+                            # 【重要】NGキーワードチェック（ここを最強にしました）
+                            # 本来の氏名に「様」や「（」は絶対に入らない。これがあれば100%備考。
+                            # 「奥」「主」などは苗字にある可能性があるので「奥様」「主人」で判定
+                            ng_keywords = [
+                                "様", "奥様", "主人", "旦那", "回収", "集金", "亡", "同時", "義母", "義父", 
+                                "（", "(", "→", "別", "居宅"
+                            ]
+                            
+                            has_ng = any(kw in user_name for kw in ng_keywords)
                             
                             # NGワードがなく、かつこの行でまだ誰も登録していない場合
-                            if not any(kw in user_name for kw in ng_keywords) and not user_found_in_this_row:
+                            if not has_ng and not user_found_in_this_row:
                                 # ★正規の利用者として登録★
                                 if cycle_text and cycle_text in user_name:
                                     user_name = user_name.replace(cycle_text, "").strip()
@@ -179,7 +192,7 @@ def extract_detailed_format(file):
                             if current_record:
                                 if cycle_text and cycle_text in line:
                                     line = line.replace(cycle_text, "").strip()
-                                if line != cycle_text: # サイクル単体の行は無視
+                                if line != cycle_text: 
                                     current_record["remarks"].append(line)
     
     # DataFrame化

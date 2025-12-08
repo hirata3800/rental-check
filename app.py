@@ -70,9 +70,8 @@ def is_ignore_line(line):
     return False
 
 def extract_detailed_format(file):
-    # 1. まずは全てのID行候補を一旦抽出する
-    raw_records = []
-    current_record = None 
+    # 1. まず全行を読み取る
+    raw_lines = []
     
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
@@ -86,6 +85,7 @@ def extract_detailed_format(file):
                 for row in table:
                     if not any(row): continue
                     
+                    # セル内の文字列を結合・クリーニング
                     cells = [str(cell) if cell is not None else "" for cell in row]
                     non_empty_cells = [c for c in cells if c.strip() != ""]
                     if not non_empty_cells: continue
@@ -94,6 +94,7 @@ def extract_detailed_format(file):
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
+                    # サイクル抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
@@ -106,79 +107,72 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # 数字6桁以上で始まっていれば、一旦レコード候補とする
-                        match = re.match(r'^(\d{6,})(.*)', line)
-                        
-                        if match and '/' not in line:
-                            user_id = match.group(1)
-                            user_name = match.group(2).strip()
-                            
-                            # 名前からサイクル文字を削除
-                            if cycle_text and cycle_text in user_name:
-                                user_name = user_name.replace(cycle_text, "").strip()
+                        raw_lines.append({
+                            "text": line,
+                            "cycle": cycle_text,
+                            "amount": amount_val
+                        })
 
-                            current_record = {
-                                "id": user_id,
-                                "name": user_name,
-                                "cycle": cycle_text, 
-                                "remarks": [],
-                                "amount_val": amount_val
-                            }
-                            raw_records.append(current_record)
-                        else:
-                            # ID行でないなら備考
-                            if current_record is not None:
-                                if not current_record["cycle"] and cycle_text:
-                                    current_record["cycle"] = cycle_text
-                                
-                                if line != cycle_text:
-                                    if cycle_text and cycle_text in line:
-                                        line = line.replace(cycle_text, "").strip()
-                                    if line:
-                                        current_record["remarks"].append(line)
-
-    # 2. 【重要】抽出後のデータをチェックし、不適切なID行を前の人の備考にマージする
+    # 2. 読み取った行を「利用者」か「備考」かに振り分ける
     final_records = []
+    current_record = None
     
-    if raw_records:
-        # 最初の1件目は無条件に追加
-        final_records.append(raw_records[0])
+    for entry in raw_lines:
+        line = entry["text"]
         
-        for i in range(1, len(raw_records)):
-            current = raw_records[i]
-            prev = final_records[-1]
+        is_new_user = False
+        
+        # 条件1: 数字6桁以上で始まっているか
+        match = re.match(r'^(\d{6,})(.*)', line)
+        
+        if match and '/' not in line:
+            user_id = match.group(1)
+            name_part = match.group(2).strip()
             
-            # 名前に「本来の名前に含まれないはずのキーワード」があるかチェック
-            # これがあれば、ID行ではなく「備考」とみなして前の人にくっつける
-            ignore_keywords = [
+            # 条件2: 【重要】名前に「他人への参照キーワード」が含まれていないか
+            # これが含まれていれば、IDで始まっていても「備考」とみなす
+            ng_keywords = [
                 "様の", "の奥様", "のご主人", "の旦那", "家族", "娘", "息子", "親戚", 
                 "回収", "集金", "亡", "同時", "義母", "義父", "奥さん",
                 "（", "→", "別", "居宅", "ケアマネ"
             ]
             
-            # 名前の中にキーワードが含まれているか？
-            is_fake_user = any(kw in current['name'] for kw in ignore_keywords)
+            has_ng_word = any(kw in name_part for kw in ng_keywords)
             
-            # または名前が空っぽ（IDだけ）の場合も怪しい
-            if not current['name']:
-                is_fake_user = True
-
-            if is_fake_user:
-                # これは備考だ！前の人の備考に追加する
-                # 元のテキストを復元して追加 (例: "0100... 藤吉様の奥様")
-                merged_text = f"{current['id']} {current['name']}"
-                if current['remarks']:
-                    merged_text += " " + " ".join(current['remarks'])
+            # 名前が極端に長い場合も備考の可能性が高い
+            is_too_long = len(name_part) > 15
+            
+            if not has_ng_word:
+                is_new_user = True
                 
-                prev['remarks'].append(merged_text)
+                # サイクル文字の除去
+                if entry["cycle"] and entry["cycle"] in name_part:
+                    name_part = name_part.replace(entry["cycle"], "").strip()
                 
-                # もしこの行に金額が入っていたらどうするか？通常備考行には金額はないはずだが、
-                # もしあれば前の人に足すなどの処理が必要かもしれないが、一旦無視する
-            else:
-                # 正しい利用者なのでリストに追加
-                final_records.append(current)
+                # ユーザー情報セット
+                user_name = name_part
 
-    # 3. DataFrame化
+        if is_new_user:
+            # 新しい利用者として作成
+            current_record = {
+                "id": user_id,
+                "name": user_name,
+                "cycle": entry["cycle"],
+                "remarks": [],
+                "amount_val": entry["amount"]
+            }
+            final_records.append(current_record)
+        else:
+            # 備考として追加（前のユーザーが存在すれば）
+            if current_record:
+                # サイクル文字そのものでなければ追加
+                if entry["cycle"] and entry["cycle"] in line:
+                    line = line.replace(entry["cycle"], "").strip()
+                
+                if line:
+                    current_record["remarks"].append(line)
+
+    # 3. データフレーム化
     data_list = []
     for rec in final_records:
         data_list.append({
@@ -223,12 +217,10 @@ if file_current and file_prev:
                 suffixes=('_curr', '_prev')
             )
             
-            # フラグ設定
             merged['is_new'] = merged['amount_val_prev'].isna()
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
-            # 表示用フォーマット
             def format_curr(val):
                 return f"{int(val):,}" if pd.notnull(val) else "0"
             def format_prev(val):
@@ -241,9 +233,6 @@ if file_current and file_prev:
             final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
-            # ==========================================
-            # スタイリング
-            # ==========================================
             def highlight_rows(row):
                 bg_color = 'white'
                 text_color = 'black'

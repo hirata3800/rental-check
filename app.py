@@ -58,20 +58,9 @@ def clean_currency(x):
     except: pass
     return 0
 
-def is_ignore_line(line):
-    line = line.strip()
-    if not line: return True
-    if "ページ" in line: return True
-    if "請求サイクル" in line: return True
-    if "未収金額" in line: return True
-    if "利用者名" in line: return True
-    if "請求額" in line: return True
-    if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', line): return True
-    return False
-
 def extract_detailed_format(file):
-    # 1. まず全行を読み取る
-    raw_lines = []
+    # 1. まずは「IDっぽい行」を全て候補として抽出する
+    raw_candidates = []
     
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
@@ -85,7 +74,7 @@ def extract_detailed_format(file):
                 for row in table:
                     if not any(row): continue
                     
-                    # セル内の文字列を結合・クリーニング
+                    # 行内の有効なセルを取得
                     cells = [str(cell) if cell is not None else "" for cell in row]
                     non_empty_cells = [c for c in cells if c.strip() != ""]
                     if not non_empty_cells: continue
@@ -94,7 +83,7 @@ def extract_detailed_format(file):
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
-                    # サイクル抽出
+                    # サイクル文字の抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
@@ -105,74 +94,93 @@ def extract_detailed_format(file):
                     lines = key_text_block.split('\n')
                     for line in lines:
                         line = line.strip()
-                        if is_ignore_line(line): continue
+                        if not line: continue
                         
-                        raw_lines.append({
-                            "text": line,
-                            "cycle": cycle_text,
-                            "amount": amount_val
-                        })
+                        # --- 候補データの作成 ---
+                        # 数字6桁以上で始まれば、一旦「候補」とする
+                        match = re.match(r'^(\d{6,})(.*)', line)
+                        
+                        if match and '/' not in line and "ページ" not in line:
+                            user_id = match.group(1)
+                            raw_name = match.group(2).strip()
+                            
+                            # 名前からサイクル文字を削除
+                            if cycle_text and cycle_text in raw_name:
+                                raw_name = raw_name.replace(cycle_text, "").strip()
 
-    # 2. 読み取った行を「利用者」か「備考」かに振り分ける
+                            raw_candidates.append({
+                                "type": "user_candidate",
+                                "id": user_id,
+                                "name": raw_name,
+                                "cycle": cycle_text,
+                                "amount": amount_val,
+                                "original_line": line
+                            })
+                        else:
+                            # IDでない行は「テキスト行」として保持
+                            if line != cycle_text and "ページ" not in line:
+                                raw_candidates.append({
+                                    "type": "text",
+                                    "content": line,
+                                    "cycle": cycle_text # サイクルがある行の可能性もある
+                                })
+
+    # 2. 【重要】後処理フィルター：候補リストを精査して、本当の利用者と備考を振り分ける
     final_records = []
-    current_record = None
     
-    for entry in raw_lines:
-        line = entry["text"]
-        
-        is_new_user = False
-        
-        # 条件1: 数字6桁以上で始まっているか
-        match = re.match(r'^(\d{6,})(.*)', line)
-        
-        if match and '/' not in line:
-            user_id = match.group(1)
-            name_part = match.group(2).strip()
-            
-            # 条件2: 【重要】名前に「他人への参照キーワード」が含まれていないか
-            # これが含まれていれば、IDで始まっていても「備考」とみなす
-            ng_keywords = [
-                "様の", "の奥様", "のご主人", "の旦那", "家族", "娘", "息子", "親戚", 
-                "回収", "集金", "亡", "同時", "義母", "義父", "奥さん",
-                "（", "→", "別", "居宅", "ケアマネ"
-            ]
-            
-            has_ng_word = any(kw in name_part for kw in ng_keywords)
-            
-            # 名前が極端に長い場合も備考の可能性が高い
-            is_too_long = len(name_part) > 15
-            
-            if not has_ng_word:
-                is_new_user = True
-                
-                # サイクル文字の除去
-                if entry["cycle"] and entry["cycle"] in name_part:
-                    name_part = name_part.replace(entry["cycle"], "").strip()
-                
-                # ユーザー情報セット
-                user_name = name_part
+    # 判定用NGキーワード（名前にこれらが含まれていたら、それは利用者ではない）
+    ng_keywords = [
+        "様", "奥", "主", "夫", "妻", "娘", "息", "族", "親", # 続柄・敬称
+        "亡", "集", "回", "同", "→", "(", "（", "【", "「", "介", "施" # 記号・動作
+    ]
 
-        if is_new_user:
-            # 新しい利用者として作成
-            current_record = {
-                "id": user_id,
-                "name": user_name,
-                "cycle": entry["cycle"],
-                "remarks": [],
-                "amount_val": entry["amount"]
-            }
-            final_records.append(current_record)
-        else:
-            # 備考として追加（前のユーザーが存在すれば）
-            if current_record:
-                # サイクル文字そのものでなければ追加
-                if entry["cycle"] and entry["cycle"] in line:
-                    line = line.replace(entry["cycle"], "").strip()
-                
-                if line:
-                    current_record["remarks"].append(line)
+    for item in raw_candidates:
+        if item["type"] == "user_candidate":
+            name_check = item["name"]
+            
+            # 判定：名前にNGワードが含まれているか？
+            is_fake_user = any(kw in name_check for kw in ng_keywords)
+            
+            # 判定：名前が極端に短い（1文字以下）または無い場合も怪しい
+            if len(name_check) <= 1: 
+                # ただし、本当に1文字の苗字の人もいるかもしれないが、通常スペースがあるので
+                # ここでは安全のため弾かないでおく、またはスペース無しなら弾く
+                pass
 
-    # 3. データフレーム化
+            if is_fake_user:
+                # 偽ユーザー（備考欄の参照ID）だった場合
+                # 直前の正しいユーザーの備考に追加する
+                if final_records:
+                    prev = final_records[-1]
+                    prev["remarks"].append(item["original_line"])
+            else:
+                # 正しいユーザーとみなす
+                new_record = {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "cycle": item["cycle"],
+                    "remarks": [],
+                    "amount_val": item["amount"]
+                }
+                final_records.append(new_record)
+        
+        elif item["type"] == "text":
+            # 通常のテキスト行（備考）
+            if final_records:
+                prev = final_records[-1]
+                # サイクル文字が混ざっていたら除去
+                text = item["content"]
+                if item["cycle"] and item["cycle"] in text:
+                    text = text.replace(item["cycle"], "").strip()
+                
+                if text:
+                    prev["remarks"].append(text)
+                
+                # もしこのテキスト行でサイクルが見つかっていれば補完
+                if not prev["cycle"] and item["cycle"]:
+                    prev["cycle"] = item["cycle"]
+
+    # 3. DataFrame化
     data_list = []
     for rec in final_records:
         data_list.append({

@@ -23,7 +23,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 簡易認証機能 ---
+# --- 簡易認証 ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
@@ -33,7 +33,7 @@ def check_password():
     st.title("🔒 ログイン")
     password = st.text_input("パスワードを入力してください", type="password")
     if st.button("ログイン"):
-        if password == st.secrets["APP_PASSWORD"]: 
+        if password == st.secrets["APP_PASSWORD"]:
             st.session_state.password_correct = True
             st.rerun()
         else:
@@ -43,20 +43,20 @@ def check_password():
 if not check_password():
     st.stop()
 
+
 # ==========================================
 # データ処理機能
 # ==========================================
 
 def clean_currency(x):
-    """金額文字列を数値に変換（日付誤認防止機能付き）"""
-    if not isinstance(x, str): return 0
+    """金額文字列を数値に変換（日付誤認防止）"""
+    if not isinstance(x, str): 
+        return 0
     
-    # 改行がある場合は1行目のみ評価
-    if '\n' in x: x = x.split('\n')[0]
-    
-    # 【重要】日付（スラッシュやドット入り）が含まれていたら金額ではないとみなす
-    # 例: "2025/11/25" -> 0円とする
-    if '/' in x or '202' in x: # 年号っぽい数字も警戒
+    if '\n' in x:
+        x = x.split('\n')[0]
+
+    if '/' in x or '202' in x:
         return 0
         
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
@@ -64,17 +64,16 @@ def clean_currency(x):
     s = s.translate(table)
     
     try:
-        # 純粋な数値パターンだけを探す
         match = re.search(r'-?\d+', s)
         if match:
             val = int(match.group())
-            # 【重要】異常に大きな数字（日付の誤認など）や小さすぎる数字は除外
-            # 請求額が50万円を超えることは稀と想定（誤認防止の安全策）
-            if abs(val) > 500000: 
+            if abs(val) > 500000:
                 return 0
             return val
-    except: pass
+    except:
+        pass
     return 0
+
 
 def is_ignore_line(line):
     line = line.strip()
@@ -87,129 +86,131 @@ def is_ignore_line(line):
     if re.match(r'^\d{4}/\d{1,2}/\d{1,2}$', line): return True
     return False
 
+
+# ==============================================
+# ★ 完全書き換え版 extract_detailed_format 関数
+# ==============================================
 def extract_detailed_format(file):
+
+    NG_WORDS = [
+        "様", "奥", "夫", "妻", "娘", "息", "親", "義",
+        "回収", "集金", "亡", "同時",
+        "（", "(", "→", "ﾚﾝﾀﾙ", "なし"
+    ]
+
     data_list = []
-    current_record = None 
-    
+    current_record = None
+
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
+
             tables = page.extract_tables(table_settings={
-                "vertical_strategy": "text", 
+                "vertical_strategy": "text",
                 "horizontal_strategy": "text",
                 "snap_tolerance": 3
             })
-            
+
             for table in tables:
                 for row in table:
-                    if not any(row): continue
+
+                    if not any(row):
+                        continue
                     
-                    # セルの中身（テキスト）を結合して取得
                     cells = [str(cell).strip() if cell is not None else "" for cell in row]
-                    non_empty_cells = [c for c in cells if c]
-                    
-                    if not non_empty_cells: continue
-                    
-                    # 金額列の判定（列数が少ない、または日付っぽい場合は0円にする）
-                    if len(non_empty_cells) < 2:
-                        amount_val = 0
-                    else:
-                        amount_str = non_empty_cells[-1] 
-                        amount_val = clean_currency(amount_str)
-                    
-                    # サイクル文字の抽出
+                    non_empty = [c for c in cells if c]
+
+                    if not non_empty:
+                        continue
+
+                    amount_val = 0
+                    if len(non_empty) >= 2:
+                        amount_val = clean_currency(non_empty[-1])
+
                     cycle_text = ""
-                    for cell in non_empty_cells:
+                    for cell in non_empty:
                         if re.search(r'\d+\s*(?:ヶ月|年)', cell):
                             cycle_text = cell
                             break
-                    
-                    # テキストブロック解析
-                    key_text_block = non_empty_cells[0]
-                    lines = key_text_block.split('\n')
-                    
-                    # ========================================================
-                    # 【判定ロジック】
-                    # ========================================================
-                    
-                    # --- ケースA: 金額が0円の場合 ---
-                    # この行は絶対に利用者ではない。備考確定。
+
+                    key_text = non_empty[0]
+                    lines = key_text.split("\n")
+
+                    # -----------------------------------------
+                    # 金額が無い行 → 備考
+                    # -----------------------------------------
                     if amount_val == 0:
                         if current_record:
                             for line in lines:
                                 line = line.strip()
-                                if is_ignore_line(line): continue
-                                
-                                if cycle_text and cycle_text in line:
+                                if is_ignore_line(line):
+                                    continue
+                                if cycle_text in line:
                                     line = line.replace(cycle_text, "").strip()
                                 if line:
                                     current_record["remarks"].append(line)
                         continue
 
-                    # --- ケースB: 金額がある場合（利用者行の可能性が高い） ---
-                    user_found_in_this_row = False
-                    
+                    # 利用者候補の行
+                    user_found_in_row = False
+
                     for line in lines:
                         line = line.strip()
-                        if is_ignore_line(line): continue
-                        
-                        # IDパターンチェック
-                        match = re.match(r'^(\d{6,})(.*)', line)
-                        
-                        if match and '/' not in line:
-                            user_id = match.group(1)
-                            user_name = match.group(2).strip()
-                            
-                            # 【重要】NGキーワードチェック
-                            # 本来の氏名に「様」や「（」は絶対に入らない。これがあれば100%備考。
-                            ng_keywords = [
-                                "様", "奥", "主", "夫", "妻", "娘", "息", "族", "親", 
-                                "回収", "集金", "亡", "同時", "義", "（", "(", "→", "別", "居宅"
-                            ]
-                            
-                            has_ng = any(kw in user_name for kw in ng_keywords)
-                            
-                            # NGワードがなく、かつこの行でまだ誰も登録していない場合
-                            if not has_ng and not user_found_in_this_row:
-                                # ★正規の利用者として登録★
-                                if cycle_text and cycle_text in user_name:
+                        if is_ignore_line(line):
+                            continue
+
+                        m = re.match(r'^(\d{6,})(.*)', line)  # ID + 名前
+                        if m and '/' not in line:
+
+                            user_id = m.group(1)
+                            user_name = m.group(2).strip()
+
+                            # ----------- NGワード先判定（重要） -----------
+                            if any(ng in user_name for ng in NG_WORDS):
+                                if current_record:
+                                    current_record["remarks"].append(line)
+                                continue
+
+                            # ----------- 本物の利用者として採用 -----------
+                            if not user_found_in_row:
+
+                                if cycle_text in user_name:
                                     user_name = user_name.replace(cycle_text, "").strip()
-                                
+
                                 current_record = {
                                     "id": user_id,
                                     "name": user_name,
-                                    "cycle": cycle_text, 
+                                    "cycle": cycle_text,
                                     "remarks": [],
                                     "amount_val": amount_val
                                 }
                                 data_list.append(current_record)
-                                user_found_in_this_row = True
-                            else:
-                                # NGワード入り or 2人目のID は備考へ
-                                if current_record:
-                                    if cycle_text and cycle_text in line:
-                                        line = line.replace(cycle_text, "").strip()
-                                    current_record["remarks"].append(line)
-                        
-                        else:
-                            # IDでない行はすべて備考へ
+                                user_found_in_row = True
+                                continue
+
+                            # もし2件目のID → 備考扱い
                             if current_record:
-                                if cycle_text and cycle_text in line:
+                                current_record["remarks"].append(line)
+                            continue
+
+                        else:
+                            # IDでない行は備考
+                            if current_record:
+                                if cycle_text in line:
                                     line = line.replace(cycle_text, "").strip()
-                                if line != cycle_text: 
-                                    current_record["remarks"].append(line)
-    
-    # DataFrame化
-    final_data = []
+                                current_record["remarks"].append(line)
+
+    final = []
     for rec in data_list:
-        final_data.append({
+        final.append({
             "id": rec["id"],
             "name": rec["name"],
             "cycle": rec["cycle"],
             "remarks": " ".join(rec["remarks"]),
             "amount_val": rec["amount_val"]
         })
-        
-    return pd.DataFrame(final_data)
+
+    return pd.DataFrame(final)
+
 
 # ==========================================
 # アプリ画面
@@ -224,79 +225,69 @@ with col1:
 with col2:
     file_prev = st.file_uploader("② 前回請求分 (Previous)", type="pdf", key="t")
 
+
 if file_current and file_prev:
-    with st.spinner('比較中...'):
+
+    with st.spinner("比較中..."):
+
         df_current = extract_detailed_format(file_current)
-        df_prev = extract_detailed_format(file_prev)
+        df_prev    = extract_detailed_format(file_prev)
 
         if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
-        else:
-            df_current = df_current.drop_duplicates(subset=['id'])
-            df_prev = df_prev.drop_duplicates(subset=['id'])
-            
-            merged = pd.merge(
-                df_current, 
-                df_prev[['id', 'amount_val']], 
-                on='id', 
-                how='left', 
-                suffixes=('_curr', '_prev')
-            )
-            
-            merged['is_new'] = merged['amount_val_prev'].isna()
-            merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
-            merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
+            st.stop()
 
-            def format_curr(val):
-                return f"{int(val):,}" if pd.notnull(val) else "0"
-            def format_prev(val):
-                return f"{int(val):,}" if pd.notnull(val) else "該当なし"
+        df_current = df_current.drop_duplicates(subset=['id'])
+        df_prev = df_prev.drop_duplicates(subset=['id'])
 
-            display_df = merged.copy()
-            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
-            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_prev)
-            
-            final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
-            final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
+        merged = pd.merge(
+            df_current,
+            df_prev[['id', 'amount_val']],
+            on='id',
+            how='left',
+            suffixes=('_curr', '_prev')
+        )
 
-            def highlight_rows(row):
-                bg_color = 'white'
-                text_color = 'black'
-                
-                if '◆請◆' in str(row['備考']):
-                    bg_color = '#ffffcc'
-                
-                base_style = f'background-color: {bg_color}; color: {text_color};'
-                styles = [base_style] * len(row)
-                
-                if row['is_new']:
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                elif row['is_same']:
-                    grey_style = f'color: #a0a0a0; background-color: {bg_color};'
-                    styles[4] = grey_style
-                    styles[5] = grey_style
-                elif row['is_diff']:
-                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6;'
-                    styles[5] = f'color: blue; font-weight: bold; background-color: {bg_color};'
-                return styles
+        merged['is_new']  = merged['amount_val_prev'].isna()
+        merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
+        merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
-            st.markdown("### 判定結果")
-            st.caption("備考に「◆請◆」あり：黄色 / 新規・変更：赤背景 / 一致：金額グレー")
-            
-            styled_df = final_view.style.apply(highlight_rows, axis=1)
+        def f_curr(v): return f"{int(v):,}" if pd.notnull(v) else "0"
+        def f_prev(v): return f"{int(v):,}" if pd.notnull(v) else "該当なし"
 
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=800,
-                column_config={
-                    "ID": st.column_config.TextColumn("ID"),
-                },
-                column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
-            )
-            
-            st.download_button(
-                "結果をCSVでダウンロード (全項目)",
-                final_view.to_csv(index=False).encode('utf-8-sig'),
-                "check_result.csv"
-            )
+        view = merged.copy()
+        view['今回請求額'] = view['amount_val_curr'].apply(f_curr)
+        view['前回請求額'] = view['amount_val_prev'].apply(f_prev)
+
+        view = view[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']]
+        view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
+
+        def highlight(row):
+            bg = 'white'
+            text = 'black'
+            style = [f'background-color: {bg}; color:{text};'] * len(row)
+
+            if row['is_new']:
+                style[4] = 'background-color:#ffe6e6; color:red; font-weight:bold;'
+            elif row['is_same']:
+                style[4] = style[5] = 'color:#a0a0a0;'
+            elif row['is_diff']:
+                style[4] = 'background-color:#ffe6e6; color:red; font-weight:bold;'
+                style[5] = 'color:blue; font-weight:bold;'
+
+            return style
+
+        st.markdown("### 判定結果")
+        styled = view.style.apply(highlight, axis=1)
+
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            height=800
+        )
+
+        st.download_button(
+            "結果をCSVでダウンロード",
+            view.to_csv(index=False).encode('utf-8-sig'),
+            "check_result.csv"
+        )

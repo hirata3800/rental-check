@@ -50,10 +50,7 @@ if not check_password():
 def clean_currency(x):
     """金額文字列を数値に変換"""
     if not isinstance(x, str): return 0
-    # 複数行ある場合は最初の行の数値を取る
-    if '\n' in x:
-        x = x.split('\n')[0]
-    
+    if '\n' in x: x = x.split('\n')[0] # 複数行なら1行目だけ見る
     s = x.replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
     table = str.maketrans('０１２３４５６７８９', '0123456789')
     s = s.translate(table)
@@ -75,8 +72,8 @@ def is_ignore_line(line):
     return False
 
 def extract_detailed_format(file):
-    # 抽出された正しいユーザーを格納するリスト
-    final_records = []
+    data_list = []
+    current_record = None 
     
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
@@ -90,103 +87,89 @@ def extract_detailed_format(file):
                 for row in table:
                     if not any(row): continue
                     
-                    # 1. 行の金額を取得
+                    # 1. 行の金額を取得（これが0なら問答無用で備考）
                     cells = [str(cell).strip() if cell is not None else "" for cell in row]
                     amount_str = cells[-1] 
                     amount_val = clean_currency(amount_str)
                     
-                    # 行内のテキスト結合（空セル除く）
+                    # 行内のテキスト結合
                     non_empty_cells = [c for c in cells if c]
                     if not non_empty_cells: continue
                     
-                    # サイクル文字抽出
+                    # サイクル文字の抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
-                        match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
-                        if match:
-                            cycle_text = match.group(1)
+                        if re.search(r'\d+\s*(?:ヶ月|年)', cell):
+                            cycle_text = cell
                             break
                     
-                    # テキストブロックの取得
+                    # テキストブロック解析
                     key_text_block = non_empty_cells[0]
                     lines = key_text_block.split('\n')
                     
-                    # ========================================================
-                    # 【判定ロジック】
-                    # ========================================================
-                    
-                    # --- ケースA: 金額が0円の場合 ---
-                    # この行は利用者ではない。「備考」として確定。
-                    if amount_val == 0:
-                        if final_records:
-                            # 前のユーザーの備考に追加
-                            for line in lines:
-                                line = line.strip()
-                                if is_ignore_line(line): continue
-                                
-                                if cycle_text and cycle_text in line:
-                                    line = line.replace(cycle_text, "").strip()
-                                if line:
-                                    final_records[-1]["remarks"].append(line)
-                        continue
-
-                    # --- ケースB: 金額がある場合（1円以上） ---
-                    # 利用者の可能性があるが、「様」などのNGワードチェックを行う
-                    
-                    user_created_in_this_row = False
+                    # この行内ですでにユーザーを見つけたか？（1行につきユーザーは1人まで）
+                    user_found_in_this_row = False
                     
                     for line in lines:
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
+                        # --- 【トリプル判定ロジック】 ---
+                        is_valid_user = False
+                        
                         # IDパターンチェック
                         match = re.match(r'^(\d{6,})(.*)', line)
                         
-                        is_valid_user = False
-                        
                         if match and '/' not in line:
                             user_id = match.group(1)
-                            user_name = match.group(2).strip()
+                            rest_text = match.group(2) # IDより後ろの部分
                             
-                            # 【重要】NGキーワードチェック
-                            # 金額があっても、名前にこれらが入っていたら「備考」とみなす
-                            ng_keywords = [
-                                "様", "奥", "主", "夫", "妻", "娘", "息", "親", # 続柄・敬称
-                                "亡", "集", "回", "同", "→", "(", "（", "【", "「", "介", "施"
-                            ]
+                            # 条件1: IDの直後にスペースがあるか？ (重要)
+                            # 備考の「0100...藤吉様」はスペースが無いのでここで弾かれる
+                            has_space = re.match(r'^[\s\u3000\t]', rest_text)
                             
-                            # NGワードが含まれていない、かつまだこの行でユーザーを作っていない場合
-                            if not any(kw in user_name for kw in ng_keywords) and not user_created_in_this_row:
+                            # 条件2: NGキーワードが含まれていないか？
+                            ng_keywords = ["様の", "の奥様", "のご主人", "の旦那", "家族", "娘", "息子", "親戚", 
+                                           "回収", "集金", "亡", "同時", "義母", "義父", "奥さん"]
+                            has_ng = any(kw in rest_text for kw in ng_keywords)
+                            
+                            # 条件3: この行に金額(1円以上)があるか？ かつ まだこの行でユーザー未登録か？
+                            has_amount = (amount_val > 0)
+                            
+                            # ★ 全クリアなら採用 ★
+                            if has_space and (not has_ng) and has_amount and (not user_found_in_this_row):
                                 is_valid_user = True
                                 
-                                # サイクル文字削除
+                                user_name = rest_text.strip()
                                 if cycle_text and cycle_text in user_name:
                                     user_name = user_name.replace(cycle_text, "").strip()
                                 
-                                # ★新規ユーザー登録★
-                                new_record = {
+                                current_record = {
                                     "id": user_id,
                                     "name": user_name,
                                     "cycle": cycle_text, 
                                     "remarks": [],
                                     "amount_val": amount_val
                                 }
-                                final_records.append(new_record)
-                                user_created_in_this_row = True
+                                data_list.append(current_record)
+                                user_found_in_this_row = True
                         
                         # ユーザーとして認められなかった行はすべて備考へ
                         if not is_valid_user:
-                            if final_records:
-                                # サイクル文字削除
-                                if cycle_text and cycle_text in line:
-                                    line = line.replace(cycle_text, "").strip()
-                                if line:
-                                    final_records[-1]["remarks"].append(line)
+                            if current_record:
+                                if not current_record["cycle"] and cycle_text:
+                                    current_record["cycle"] = cycle_text
+                                
+                                if line != cycle_text:
+                                    if cycle_text and cycle_text in line:
+                                        line = line.replace(cycle_text, "").strip()
+                                    if line:
+                                        current_record["remarks"].append(line)
     
     # DataFrame化
-    data_list = []
-    for rec in final_records:
-        data_list.append({
+    final_data = []
+    for rec in data_list:
+        final_data.append({
             "id": rec["id"],
             "name": rec["name"],
             "cycle": rec["cycle"],
@@ -194,7 +177,7 @@ def extract_detailed_format(file):
             "amount_val": rec["amount_val"]
         })
         
-    return pd.DataFrame(data_list)
+    return pd.DataFrame(final_data)
 
 # ==========================================
 # アプリ画面

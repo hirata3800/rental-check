@@ -249,14 +249,3 @@ if file_current and file_prev:
                 final_view.to_csv(index=False).encode('utf-8-sig'),
                 "check_result.csv"
             )
-
-            # IDコピーパネル
-            st.divider()
-            st.subheader("📋 IDコピー用パネル")
-            copy_list = final_view['ID'] + " : " + final_view['利用者名']
-            selected_entry = st.selectbox("IDをコピーしたい人を選択", copy_list)
-            if selected_entry:
-                target_id = selected_entry.split(" : ")[0]
-                c1, c2 = st.columns([1, 4])
-                with c1: st.write("右のアイコンでコピー ➡")
-                with c2: st.code(target_id, language=None)

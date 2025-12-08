@@ -70,7 +70,8 @@ def is_ignore_line(line):
     return False
 
 def extract_detailed_format(file):
-    extracted_records = []
+    # 1. まずは全てのID行候補を一旦抽出する
+    raw_records = []
     current_record = None 
     
     with pdfplumber.open(file) as pdf:
@@ -93,7 +94,6 @@ def extract_detailed_format(file):
                     amount_str = non_empty_cells[-1] if len(non_empty_cells) > 1 else ""
                     amount_val = clean_currency(amount_str)
 
-                    # サイクル抽出
                     cycle_text = ""
                     for cell in non_empty_cells:
                         match = re.search(r'(\d+\s*(?:ヶ月|年))', cell)
@@ -106,37 +106,17 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # === 【最強版】ID行の判定ロジック ===
-                        is_user_line = False
-                        
-                        # 1. 数字6桁以上で始まっているか
+                        # 数字6桁以上で始まっていれば、一旦レコード候補とする
                         match = re.match(r'^(\d{6,})(.*)', line)
                         
                         if match and '/' not in line:
                             user_id = match.group(1)
-                            rest_text = match.group(2)
+                            user_name = match.group(2).strip()
                             
-                            # 2. 直後にスペースがあるか（これが無いとNG）
-                            has_space = re.match(r'^[\s\u3000\t]', rest_text)
-                            
-                            # 3. 【追加】NGワードチェック（ここを強化しました）
-                            # 本来の名前に「様」や「（」は絶対に入らないため、これがあれば確実に備考とみなす
-                            ignore_keywords = [
-                                "様", "奥様", "主人", "旦那", "家族", "娘", "息子", "親戚", 
-                                "回収", "集金", "亡", "同時", "義母", "義父", 
-                                "(", "（", "→", "別", "居宅"
-                            ]
-                            contains_ignore_word = any(kw in rest_text for kw in ignore_keywords)
-                            
-                            if has_space and (not contains_ignore_word):
-                                is_user_line = True
-                                user_name = rest_text.strip()
-                                
-                                if cycle_text and cycle_text in user_name:
-                                    user_name = user_name.replace(cycle_text, "").strip()
+                            # 名前からサイクル文字を削除
+                            if cycle_text and cycle_text in user_name:
+                                user_name = user_name.replace(cycle_text, "").strip()
 
-                        if is_user_line:
-                            # 新しい利用者として登録
                             current_record = {
                                 "id": user_id,
                                 "name": user_name,
@@ -144,9 +124,9 @@ def extract_detailed_format(file):
                                 "remarks": [],
                                 "amount_val": amount_val
                             }
-                            extracted_records.append(current_record)
+                            raw_records.append(current_record)
                         else:
-                            # 備考行として処理（前の人の備考に追加）
+                            # ID行でないなら備考
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
@@ -156,9 +136,51 @@ def extract_detailed_format(file):
                                         line = line.replace(cycle_text, "").strip()
                                     if line:
                                         current_record["remarks"].append(line)
+
+    # 2. 【重要】抽出後のデータをチェックし、不適切なID行を前の人の備考にマージする
+    final_records = []
     
+    if raw_records:
+        # 最初の1件目は無条件に追加
+        final_records.append(raw_records[0])
+        
+        for i in range(1, len(raw_records)):
+            current = raw_records[i]
+            prev = final_records[-1]
+            
+            # 名前に「本来の名前に含まれないはずのキーワード」があるかチェック
+            # これがあれば、ID行ではなく「備考」とみなして前の人にくっつける
+            ignore_keywords = [
+                "様の", "の奥様", "のご主人", "の旦那", "家族", "娘", "息子", "親戚", 
+                "回収", "集金", "亡", "同時", "義母", "義父", "奥さん",
+                "（", "→", "別", "居宅", "ケアマネ"
+            ]
+            
+            # 名前の中にキーワードが含まれているか？
+            is_fake_user = any(kw in current['name'] for kw in ignore_keywords)
+            
+            # または名前が空っぽ（IDだけ）の場合も怪しい
+            if not current['name']:
+                is_fake_user = True
+
+            if is_fake_user:
+                # これは備考だ！前の人の備考に追加する
+                # 元のテキストを復元して追加 (例: "0100... 藤吉様の奥様")
+                merged_text = f"{current['id']} {current['name']}"
+                if current['remarks']:
+                    merged_text += " " + " ".join(current['remarks'])
+                
+                prev['remarks'].append(merged_text)
+                
+                # もしこの行に金額が入っていたらどうするか？通常備考行には金額はないはずだが、
+                # もしあれば前の人に足すなどの処理が必要かもしれないが、一旦無視する
+            else:
+                # 正しい利用者なのでリストに追加
+                final_records.append(current)
+
+    # 3. DataFrame化
     data_list = []
-    for rec in extracted_records:
+    for rec in final_records:
         data_list.append({
             "id": rec["id"],
             "name": rec["name"],
@@ -166,6 +188,7 @@ def extract_detailed_format(file):
             "remarks": " ".join(rec["remarks"]),
             "amount_val": rec["amount_val"]
         })
+        
     return pd.DataFrame(data_list)
 
 # ==========================================

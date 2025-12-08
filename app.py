@@ -4,9 +4,11 @@ import pandas as pd
 import re
 
 # ==========================================
-# ページ設定 & UI非表示
+# ページ設定
 # ==========================================
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
+
+# UIの余計な表示を消す設定
 st.markdown("""
     <style>
     header, footer, [data-testid="stHeader"], [data-testid="stToolbar"], .stAppDeployButton {
@@ -51,7 +53,7 @@ if not check_password():
 def clean_currency(x):
     """金額文字列を数値に変換"""
     if not x: return 0
-    # 「1, 200」のように間にスペースが入るケースにも対応
+    # 「7, 200」のようなスペース入りも除去
     s = str(x).replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
     try:
         return int(s)
@@ -60,87 +62,97 @@ def clean_currency(x):
 
 def extract_text_mode(file):
     """
-    PDFを見たままの「テキスト」として読み込み、行ごとのパターンで解析する
+    PDFを「見たままテキスト」として解析する
     """
     all_records = []
     current_record = None
     
+    # デバッグ用：読み取った生データを保存
+    raw_lines_debug = []
+
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            # extract_text() で「見たままの文字列」を取得
-            text = page.extract_text()
+            # layout=True で、できるだけ見た目通りの配置でテキスト化
+            text = page.extract_text(layout=True)
             if not text:
                 continue
-                
+            
             lines = text.split('\n')
             
             for line in lines:
                 line = line.strip()
                 if not line: continue
                 
-                # ヘッダー行などはスキップ
+                # ヘッダーやページ番号は無視
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line:
                     continue
+                
+                raw_lines_debug.append(line) # デバッグ用に保存
 
-                # ========================================================
-                # 【判定ロジック】 お客様のテキスト法則に完全準拠
-                # パターン: [数字6桁以上] ... [数字とカンマ(金額)]
-                # ========================================================
+                # -----------------------------------------------------------
+                # 【判定ロジック】
+                # 行末に金額があるID行だけを狙い撃ちする
+                # 正規表現: 行頭に数字(ID) ... 途中はなんでも ... 行末に数字(金額)
+                # -----------------------------------------------------------
                 
-                # 行末の金額パターンを探す
-                # ^(\d{6,})   : 行頭に6桁以上の数字(ID)
-                # .*?         : 途中の文字(名前)
-                # ([\d, ]+)$  : 行末に「数字・カンマ・スペース」だけの塊があるか(金額)
+                # ^(\d{6,})   : ID（6桁以上）
+                # \s+         : 空白（必須！これで備考の「ID直結文字」を弾く）
+                # (.*?)       : 名前
+                # \s+         : 空白
+                # ([\d,]+)$   : 金額（行末）
+                match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
                 
-                match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d, ]+)$', line)
-                
-                is_valid_user_line = False
+                is_user_line = False
                 
                 if match:
                     user_id = match.group(1)
-                    user_name = match.group(2).strip()
+                    raw_name = match.group(2).strip()
                     amount_str = match.group(3)
                     amount_val = clean_currency(amount_str)
                     
-                    # 金額が0より大きければ「利用者行」と確定
+                    # 金額が0より大きいなら利用者確定
                     if amount_val > 0:
-                        is_valid_user_line = True
+                        is_user_line = True
                         
-                        # 名前にサイクル文字(6ヶ月など)が混ざっていたら消す
-                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', user_name)
+                        # 名前にサイクル文字が混ざっていたら消す
                         cycle_text = ""
+                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name)
                         if cycle_match:
                             cycle_text = cycle_match.group(1)
-                            user_name = user_name.replace(cycle_text, "").strip()
+                            raw_name = raw_name.replace(cycle_text, "").strip()
+                        
+                        # 名前にNGワードが含まれていないか最終チェック
+                        # (金額があっても、名前に「様」が入っていたら備考とみなす)
+                        ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
+                        if any(kw in raw_name for kw in ng_keywords):
+                            is_user_line = False # 却下
+                        else:
+                            # 採用
+                            current_record = {
+                                "id": user_id,
+                                "name": raw_name,
+                                "cycle": cycle_text,
+                                "remarks": [],
+                                "amount_val": amount_val
+                            }
+                            all_records.append(current_record)
 
-                        current_record = {
-                            "id": user_id,
-                            "name": user_name,
-                            "cycle": cycle_text,
-                            "remarks": [],
-                            "amount_val": amount_val
-                        }
-                        all_records.append(current_record)
-
-                if not is_valid_user_line:
+                if not is_user_line:
                     # 利用者行でなければ、それは「備考」か「サイクル行」
-                    # IDで始まっていても、金額がなければここに来るので備考になる
                     if current_record:
-                        # "6ヶ月" だけの行かチェック
+                        # サイクル行かチェック ("6ヶ月" だけの行)
                         if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
                             if not current_record["cycle"]:
                                 current_record["cycle"] = line
                         else:
-                            # それ以外は全て備考に追加
-                            # サイクル文字が混ざっていたら除去して追加
-                            cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', line)
-                            if cycle_match:
-                                cycle_text_in_line = cycle_match.group(1)
-                                # サイクル情報がまだなければ取得
+                            # それ以外は全て備考
+                            # サイクル文字が混ざっていたら除去
+                            cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
+                            if cycle_match_in_remark:
+                                c_text = cycle_match_in_remark.group(1)
                                 if not current_record["cycle"]:
-                                    current_record["cycle"] = cycle_text_in_line
-                                # 備考本文からは削除
-                                line = line.replace(cycle_text_in_line, "").strip()
+                                    current_record["cycle"] = c_text
+                                line = line.replace(c_text, "").strip()
                             
                             if line:
                                 current_record["remarks"].append(line)
@@ -156,7 +168,7 @@ def extract_text_mode(file):
             "amount_val": rec["amount_val"]
         })
         
-    return pd.DataFrame(data_list)
+    return pd.DataFrame(data_list), raw_lines_debug
 
 # ==========================================
 # アプリ画面
@@ -172,13 +184,17 @@ with col2:
     file_prev = st.file_uploader("② 前回請求分 (Previous)", type="pdf", key="t")
 
 if file_current and file_prev:
-    with st.spinner('テキスト解析中...'):
-        # テキストモードで抽出
-        df_current = extract_text_mode(file_current)
-        df_prev = extract_text_mode(file_prev)
+    with st.spinner('解析中...'):
+        # 抽出
+        df_current, debug_curr = extract_text_mode(file_current)
+        df_prev, debug_prev = extract_text_mode(file_prev)
 
         if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
+            # デバッグ用に読み取ったテキストを表示（何が起きているか確認用）
+            with st.expander("詳細：読み取ったテキストデータを確認する"):
+                st.write("▼ ①の読み取り結果（先頭20行）")
+                st.write(debug_curr[:20])
         else:
             # 重複排除
             df_current = df_current.drop_duplicates(subset=['id'])
@@ -199,10 +215,8 @@ if file_current and file_prev:
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
 
             # 表示整形
-            def format_curr(val):
-                return f"{int(val):,}" if pd.notnull(val) else "0"
-            def format_prev(val):
-                return f"{int(val):,}" if pd.notnull(val) else "該当なし"
+            def format_curr(val): return f"{int(val):,}" if pd.notnull(val) else "0"
+            def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし"
 
             display_df = merged.copy()
             display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
@@ -211,30 +225,21 @@ if file_current and file_prev:
             final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
-            # 色付け設定
+            # スタイリング
             def highlight_rows(row):
                 styles = ['color: black'] * len(row)
                 
-                if row['is_new']:
-                    # 新規は黒文字のまま
-                    pass
-                elif row['is_same']:
-                    # 一致はグレー
+                if row['is_same']:
                     styles = ['color: #d3d3d3'] * len(row)
                 elif row['is_diff']:
-                    # 変更は赤青強調
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                     styles[5] = 'color: blue; font-weight: bold'
                 
-                # 備考に「◆請◆」があれば行全体を黄色
+                # 備考に「◆請◆」があれば黄色
                 if '◆請◆' in str(row['備考']):
-                    # 既に色指定がある場合は背景色だけ上書き
                     for i in range(len(styles)):
                         if 'background-color' not in styles[i]:
                             styles[i] += '; background-color: #ffffcc'
-                        else:
-                            # 既存の背景色があればそのまま（赤背景優先）
-                            pass
                             
                 return styles
 

@@ -106,31 +106,32 @@ def extract_detailed_format(file):
                         line = line.strip()
                         if is_ignore_line(line): continue
                         
-                        # === 【重要】ID行の判定ロジック ===
+                        # === 【最強版】ID行の判定ロジック ===
                         is_user_line = False
                         
-                        # 1. まず数字6桁以上で始まっているか
+                        # 1. 数字6桁以上で始まっているか
                         match = re.match(r'^(\d{6,})(.*)', line)
                         
                         if match and '/' not in line:
                             user_id = match.group(1)
-                            rest_text = match.group(2) # IDの後ろの文字
+                            rest_text = match.group(2)
                             
-                            # 2. IDの直後に「スペース」があるか確認
-                            # 備考欄のID参照は「0100...藤吉様」のようにスペース無しで続くことが多い
+                            # 2. 直後にスペースがあるか（これが無いとNG）
                             has_space = re.match(r'^[\s\u3000\t]', rest_text)
                             
-                            # 3. 名前部分に「除外キーワード」が含まれていないか確認
-                            # これが含まれていれば、ID行ではなく「備考」とみなす
-                            ignore_keywords = ["様の", "の奥様", "のご主人", "の旦那", "回収", "集金", "(亡)", "（亡）", "同時", "義母", "義父"]
+                            # 3. 【追加】NGワードチェック（ここを強化しました）
+                            # 本来の名前に「様」や「（」は絶対に入らないため、これがあれば確実に備考とみなす
+                            ignore_keywords = [
+                                "様", "奥様", "主人", "旦那", "家族", "娘", "息子", "親戚", 
+                                "回収", "集金", "亡", "同時", "義母", "義父", 
+                                "(", "（", "→", "別", "居宅"
+                            ]
                             contains_ignore_word = any(kw in rest_text for kw in ignore_keywords)
                             
-                            # 判定: スペースがあり、かつ除外キーワードがない場合のみ「利用者」とする
                             if has_space and (not contains_ignore_word):
                                 is_user_line = True
                                 user_name = rest_text.strip()
                                 
-                                # 名前からサイクル文字を削除
                                 if cycle_text and cycle_text in user_name:
                                     user_name = user_name.replace(cycle_text, "").strip()
 
@@ -145,14 +146,12 @@ def extract_detailed_format(file):
                             }
                             extracted_records.append(current_record)
                         else:
-                            # 備考行として処理
+                            # 備考行として処理（前の人の備考に追加）
                             if current_record is not None:
                                 if not current_record["cycle"] and cycle_text:
                                     current_record["cycle"] = cycle_text
                                 
-                                # サイクル文字そのものでなければ備考に追加
                                 if line != cycle_text:
-                                    # 備考の中にサイクル文字が混ざっていたら消す
                                     if cycle_text and cycle_text in line:
                                         line = line.replace(cycle_text, "").strip()
                                     if line:
@@ -226,7 +225,6 @@ if file_current and file_prev:
                 bg_color = 'white'
                 text_color = 'black'
                 
-                # 備考に「◆請◆」があれば行全体を黄色に
                 if '◆請◆' in str(row['備考']):
                     bg_color = '#ffffcc'
                 

@@ -6,26 +6,42 @@ import re
 # --- ページ設定 ---
 st.set_page_config(page_title="請求書チェックツール", layout="wide")
 
-# --- 【修正点】画面の余計な表示を消す設定 ---
+# --- 【強力版】画面の余計な表示を全削除する設定 ---
 st.markdown("""
     <style>
     /* 1. ヘッダー（右上のFork, GitHub, 三点リーダー）を消す */
-    header {visibility: hidden;}
-    .stAppHeader {display: none;}
-    
-    /* 2. フッター（右下のManage app, Made with Streamlit）を消す */
-    footer {visibility: hidden;}
-    .stAppDeployButton {display: none;}
-    
-    /* 3. テーブルのタイトル行をクリック不可にする（並び替え防止） */
-    div[data-testid="stDataFrame"] th {
-        pointer-events: none;
-        cursor: default;
+    header[data-testid="stHeader"] {
+        visibility: hidden !important;
+        display: none !important;
     }
     
-    /* 画面上部の余白を詰める（ヘッダーを消した分） */
+    /* 2. フッター（右下のManage app, Made with Streamlit）を消す */
+    footer {
+        visibility: hidden !important;
+        display: none !important;
+    }
+    
+    /* 3. Manage appボタン等のデプロイ関連ボタンを消す */
+    .stAppDeployButton {
+        visibility: hidden !important;
+        display: none !important;
+    }
+    
+    /* 4. その他のツールバーも念のため消す */
+    [data-testid="stToolbar"] {
+        visibility: hidden !important;
+        display: none !important;
+    }
+    
+    /* 5. テーブルのタイトル行をクリック不可にする（並び替え防止） */
+    div[data-testid="stDataFrame"] th {
+        pointer-events: none !important;
+        cursor: default !important;
+    }
+    
+    /* 画面上部の余白を詰める */
     .block-container {
-        padding-top: 2rem;
+        padding-top: 1rem !important;
     }
     </style>
 """, unsafe_allow_html=True)

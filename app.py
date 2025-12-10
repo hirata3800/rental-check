@@ -89,32 +89,51 @@ def extract_text_mode(file):
                 
                 raw_lines_debug.append(line)
 
+                # 行末の金額パターンを探す
+                # ^(\d{6,})   : ID
+                # \s+         : 空白
+                # (.*?)       : 名前など（ここに未収金が混ざる可能性あり）
+                # \s+         : 空白
+                # ([\d,]+)$   : 請求金額（行末）
                 match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
                 
                 is_user_line = False
                 
                 if match:
                     user_id = match.group(1)
-                    raw_name = match.group(2).strip()
+                    raw_name_part = match.group(2).strip()
                     amount_str = match.group(3)
                     amount_val = clean_currency(amount_str)
                     
                     if amount_val > 0:
                         is_user_line = True
                         
+                        # === 【ここが今回の修正点】名前のクリーニング ===
+                        # 名前部分の末尾に、さらに数字（未収金額）がついているかチェック
+                        # 例: "古林リキ 16,080"  <-- この "16,080" を除去したい
+                        
+                        uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
+                        if uncollected_match:
+                            possible_money = clean_currency(uncollected_match.group(1))
+                            # それっぽい金額なら名前から削除
+                            if possible_money > 0:
+                                raw_name_part = raw_name_part[:uncollected_match.start()].strip()
+
+                        # サイクル文字の除去
                         cycle_text = ""
-                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name)
+                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
                         if cycle_match:
                             cycle_text = cycle_match.group(1)
-                            raw_name = raw_name.replace(cycle_text, "").strip()
+                            raw_name_part = raw_name_part.replace(cycle_text, "").strip()
                         
+                        # NGワードチェック
                         ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
-                        if any(kw in raw_name for kw in ng_keywords):
+                        if any(kw in raw_name_part for kw in ng_keywords):
                             is_user_line = False
                         else:
                             current_record = {
                                 "id": user_id,
-                                "name": raw_name,
+                                "name": raw_name_part,
                                 "cycle": cycle_text,
                                 "remarks": [],
                                 "amount_val": amount_val
@@ -227,19 +246,15 @@ if file_current and file_prev:
                 now = datetime.datetime.now()
                 file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
                 
-                # ▼▼▼【ここを追加しました】▼▼▼
                 # CSV用データの作成（画面表示用とは別にする）
                 csv_export = final_view.copy()
-                
                 # ID列を ="000..." の形式に変換する
-                # これによりExcelで開いても「0」が消えなくなります
                 csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
-                # ▲▲▲【ここまで追加】▲▲▲
                 
                 st.write("")
                 st.download_button(
                     "結果をCSVでダウンロード",
-                    csv_export.to_csv(index=False).encode('utf-8-sig'), # ← 加工したデータを出力に変更
+                    csv_export.to_csv(index=False).encode('utf-8-sig'),
                     file_name,
                     mime='text/csv'
                 )
@@ -250,10 +265,8 @@ if file_current and file_prev:
                 height=800,
                 hide_index=True,
                 column_config={
-                    # 【ここが修正点】width="small" を指定して幅を最小に
                     "No.": st.column_config.NumberColumn("No.", format="%d", width="small"),
                     "ID": st.column_config.TextColumn("ID"),
                 },
                 column_order=['No.', 'ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
-

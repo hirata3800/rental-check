@@ -6,7 +6,7 @@ import re
 # ==========================================
 # ページ設定
 # ==========================================
-st.set_page_config(page_title="請求書チェックツール", layout="wide")
+st.set_page_config(page_title="利用者請求額チェックツール", layout="wide")
 
 # UIの余計な表示を消す設定
 st.markdown("""
@@ -174,7 +174,7 @@ def extract_text_mode(file):
 # アプリ画面
 # ==========================================
 
-st.title('📄 レンタル伝票 差異チェックツール')
+st.title('📄 利用者請求額チェックツール')
 st.caption("①今回分を基準に、②前回分と比較します。")
 
 col1, col2 = st.columns(2)
@@ -216,7 +216,7 @@ if file_current and file_prev:
 
             # 表示整形
             def format_curr(val): return f"{int(val):,}" if pd.notnull(val) else "0"
-            def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし"
+            def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし（新規）" # 変更点3
 
             display_df = merged.copy()
             display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
@@ -229,11 +229,18 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = ['color: black'] * len(row)
                 
+                # 変更点1 & 2
                 if row['is_same']:
-                    styles = ['color: #d3d3d3'] * len(row)
+                    # 金額一致：今回と前回の金額列のみグレー
+                    styles[4] = 'color: #d3d3d3' # 今回請求額
+                    styles[5] = 'color: #d3d3d3' # 前回請求額
                 elif row['is_diff']:
+                    # 金額不一致
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                     styles[5] = 'color: blue; font-weight: bold'
+                elif row['is_new']: # 変更点2
+                    # 新規の場合（前回なし）
+                    styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                 
                 # 備考に「◆請◆」があれば黄色
                 if '◆請◆' in str(row['備考']):

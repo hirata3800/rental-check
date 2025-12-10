@@ -2,6 +2,7 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
+import datetime
 
 # ==========================================
 # ページ設定
@@ -194,14 +195,12 @@ if file_current and file_prev:
             final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
 
-            # No.列を追加（1始まり）
+            # No.列を追加
             final_view.insert(0, 'No.', range(1, len(final_view) + 1))
 
             def highlight_rows(row):
-                # No.列が増えたのでスタイル配列も+1
                 styles = ['color: black'] * len(row)
                 
-                # インデックスがずれるので +1 する (No.列の分)
                 curr_idx = 5 # 今回請求額
                 prev_idx = 6 # 前回請求額
                 
@@ -225,19 +224,24 @@ if file_current and file_prev:
             with c1:
                 st.markdown("### 判定結果")
             with c2:
+                now = datetime.datetime.now()
+                file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
+                
                 st.write("")
                 st.download_button(
                     "結果をCSVでダウンロード",
                     final_view.to_csv(index=False).encode('utf-8-sig'),
-                    "check_result.csv"
+                    file_name,
+                    mime='text/csv'
                 )
 
             st.dataframe(
                 final_view.style.apply(highlight_rows, axis=1),
                 use_container_width=True,
                 height=800,
-                hide_index=True, # 左端の0始まりインデックスを隠す
+                hide_index=True,
                 column_config={
+                    # 【ここが修正点】width="small" を指定して幅を最小に
                     "No.": st.column_config.NumberColumn("No.", format="%d", width="small"),
                     "ID": st.column_config.TextColumn("ID"),
                 },

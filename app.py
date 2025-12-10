@@ -227,10 +227,19 @@ if file_current and file_prev:
                 now = datetime.datetime.now()
                 file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
                 
+                # ▼▼▼【ここを追加しました】▼▼▼
+                # CSV用データの作成（画面表示用とは別にする）
+                csv_export = final_view.copy()
+                
+                # ID列を ="000..." の形式に変換する
+                # これによりExcelで開いても「0」が消えなくなります
+                csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
+                # ▲▲▲【ここまで追加】▲▲▲
+                
                 st.write("")
                 st.download_button(
                     "結果をCSVでダウンロード",
-                    final_view.to_csv(index=False).encode('utf-8-sig'),
+                    csv_export.to_csv(index=False).encode('utf-8-sig'), # ← 加工したデータを出力に変更
                     file_name,
                     mime='text/csv'
                 )
@@ -247,3 +256,4 @@ if file_current and file_prev:
                 },
                 column_order=['No.', 'ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
+

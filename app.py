@@ -21,6 +21,8 @@ st.markdown("""
     .block-container {
         padding-top: 1rem !important;
     }
+    /* ボタンの位置調整 */
+    div.stButton {text-align: right;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -179,9 +181,9 @@ st.caption("①今回分を基準に、②前回分と比較します。")
 
 col1, col2 = st.columns(2)
 with col1:
-    file_current = st.file_uploader("① 今回請求分 (Current)", type="pdf", key="m")
+    file_current = st.file_uploader("① 今回請求分", type="pdf", key="m")
 with col2:
-    file_prev = st.file_uploader("② 前回請求分 (Previous)", type="pdf", key="t")
+    file_prev = st.file_uploader("② 前回請求分", type="pdf", key="t")
 
 if file_current and file_prev:
     with st.spinner('解析中...'):
@@ -216,7 +218,7 @@ if file_current and file_prev:
 
             # 表示整形
             def format_curr(val): return f"{int(val):,}" if pd.notnull(val) else "0"
-            def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし（新規）" # 変更点3
+            def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし（新規）"
 
             display_df = merged.copy()
             display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
@@ -229,7 +231,6 @@ if file_current and file_prev:
             def highlight_rows(row):
                 styles = ['color: black'] * len(row)
                 
-                # 変更点1 & 2
                 if row['is_same']:
                     # 金額一致：今回と前回の金額列のみグレー
                     styles[4] = 'color: #d3d3d3' # 今回請求額
@@ -238,7 +239,7 @@ if file_current and file_prev:
                     # 金額不一致
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                     styles[5] = 'color: blue; font-weight: bold'
-                elif row['is_new']: # 変更点2
+                elif row['is_new']:
                     # 新規の場合（前回なし）
                     styles[4] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                 
@@ -250,21 +251,24 @@ if file_current and file_prev:
                             
                 return styles
 
-            st.markdown("### 判定結果")
-            st.caption("文字グレー：前回と一致 / 赤青：金額変更")
-            
-            styled_df = final_view.style.apply(highlight_rows, axis=1)
+            # ----------------------------------------------------
+            # レイアウト変更：タイトルとダウンロードボタンを横並びに
+            # ----------------------------------------------------
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown("### 判定結果")
+            with c2:
+                st.write("") # 高さ調整用
+                st.download_button(
+                    "結果をCSVでダウンロード",
+                    final_view.to_csv(index=False).encode('utf-8-sig'),
+                    "check_result.csv"
+                )
 
             st.dataframe(
-                styled_df,
+                final_view.style.apply(highlight_rows, axis=1),
                 use_container_width=True,
                 height=800,
                 column_config={"ID": st.column_config.TextColumn("ID")},
                 column_order=['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
-            )
-            
-            st.download_button(
-                "結果をCSVでダウンロード",
-                final_view.to_csv(index=False).encode('utf-8-sig'),
-                "check_result.csv"
             )

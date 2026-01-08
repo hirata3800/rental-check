@@ -84,7 +84,8 @@ def extract_text_mode(file):
                 line = line.strip()
                 if not line: continue
                 
-                if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line:
+                # === 【修正点】ここで「合計」を含む行も無視するように追加 ===
+                if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
                     continue
                 
                 raw_lines_debug.append(line)
@@ -108,14 +109,10 @@ def extract_text_mode(file):
                     if amount_val > 0:
                         is_user_line = True
                         
-                        # === 【ここが今回の修正点】名前のクリーニング ===
-                        # 名前部分の末尾に、さらに数字（未収金額）がついているかチェック
-                        # 例: "古林リキ 16,080"  <-- この "16,080" を除去したい
-                        
+                        # 名前のクリーニング（末尾の未収金額除去）
                         uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
                         if uncollected_match:
                             possible_money = clean_currency(uncollected_match.group(1))
-                            # それっぽい金額なら名前から削除
                             if possible_money > 0:
                                 raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
@@ -173,6 +170,7 @@ def extract_text_mode(file):
 # ==========================================
 
 st.title('📄 利用者請求額チェックツール')
+st.caption("①今回分を基準に、②前回分と比較します。")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -245,9 +243,8 @@ if file_current and file_prev:
                 now = datetime.datetime.now()
                 file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
                 
-                # CSV用データの作成（画面表示用とは別にする）
+                # CSV用データの作成
                 csv_export = final_view.copy()
-                # ID列を ="000..." の形式に変換する
                 csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
                 
                 st.write("")
@@ -269,4 +266,3 @@ if file_current and file_prev:
                 },
                 column_order=['No.', 'ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
-

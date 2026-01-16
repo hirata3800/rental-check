@@ -1,5 +1,5 @@
 import streamlit as st
-import pdfplumber
+from pypdf import PdfReader # ← pdfplumberから変更
 import pandas as pd
 import re
 import datetime
@@ -64,7 +64,7 @@ def clean_currency(x):
 
 def extract_text_mode(file):
     """
-    PDFを「見たままテキスト」として解析する
+    PDFをテキストとして解析する（軽量版：pypdf使用）
     """
     all_records = []
     current_record = None
@@ -72,86 +72,93 @@ def extract_text_mode(file):
     # デバッグ用
     raw_lines_debug = []
 
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text(layout=True)
-            if not text:
+    # === 【変更点】軽量なpypdfで読み込む ===
+    try:
+        reader = PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            # 無視する行（合計行なども含む）
+            if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
                 continue
             
-            lines = text.split('\n')
+            raw_lines_debug.append(line)
+
+            # 行末の金額パターンを探す
+            # ^(\d{6,})   : ID
+            # \s+         : 空白
+            # (.*?)       : 名前など（ここに未収金が混ざる可能性あり）
+            # \s+         : 空白
+            # ([\d,]+)$   : 請求金額（行末）
+            match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
             
-            for line in lines:
-                line = line.strip()
-                if not line: continue
+            is_user_line = False
+            
+            if match:
+                user_id = match.group(1)
+                raw_name_part = match.group(2).strip()
+                amount_str = match.group(3)
+                amount_val = clean_currency(amount_str)
                 
-                # === 【修正点】ここで「合計」を含む行も無視するように追加 ===
-                if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
-                    continue
-                
-                raw_lines_debug.append(line)
-
-                # 行末の金額パターンを探す
-                # ^(\d{6,})   : ID
-                # \s+         : 空白
-                # (.*?)       : 名前など（ここに未収金が混ざる可能性あり）
-                # \s+         : 空白
-                # ([\d,]+)$   : 請求金額（行末）
-                match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
-                
-                is_user_line = False
-                
-                if match:
-                    user_id = match.group(1)
-                    raw_name_part = match.group(2).strip()
-                    amount_str = match.group(3)
-                    amount_val = clean_currency(amount_str)
+                if amount_val > 0:
+                    is_user_line = True
                     
-                    if amount_val > 0:
-                        is_user_line = True
-                        
-                        # 名前のクリーニング（末尾の未収金額除去）
-                        uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
-                        if uncollected_match:
-                            possible_money = clean_currency(uncollected_match.group(1))
-                            if possible_money > 0:
-                                raw_name_part = raw_name_part[:uncollected_match.start()].strip()
+                    # 名前のクリーニング（末尾の未収金額除去）
+                    # 今回のデータ(2)のように「名前 2,400 2,400」となっている場合に対応
+                    uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
+                    if uncollected_match:
+                        possible_money = clean_currency(uncollected_match.group(1))
+                        # 金額っぽい数字が末尾にあれば削除
+                        if possible_money > 0:
+                            raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
-                        # サイクル文字の除去
-                        cycle_text = ""
-                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
-                        if cycle_match:
-                            cycle_text = cycle_match.group(1)
-                            raw_name_part = raw_name_part.replace(cycle_text, "").strip()
-                        
-                        # NGワードチェック
-                        ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
-                        if any(kw in raw_name_part for kw in ng_keywords):
-                            is_user_line = False
-                        else:
-                            current_record = {
-                                "id": user_id,
-                                "name": raw_name_part,
-                                "cycle": cycle_text,
-                                "remarks": [],
-                                "amount_val": amount_val
-                            }
-                            all_records.append(current_record)
+                    # サイクル文字の除去
+                    cycle_text = ""
+                    cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
+                    if cycle_match:
+                        cycle_text = cycle_match.group(1)
+                        raw_name_part = raw_name_part.replace(cycle_text, "").strip()
+                    
+                    # NGワードチェック
+                    ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
+                    if any(kw in raw_name_part for kw in ng_keywords):
+                        is_user_line = False
+                    else:
+                        current_record = {
+                            "id": user_id,
+                            "name": raw_name_part,
+                            "cycle": cycle_text,
+                            "remarks": [],
+                            "amount_val": amount_val
+                        }
+                        all_records.append(current_record)
 
-                if not is_user_line:
-                    if current_record:
-                        if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
+            if not is_user_line:
+                if current_record:
+                    if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
+                        if not current_record["cycle"]:
+                            current_record["cycle"] = line
+                    else:
+                        cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
+                        if cycle_match_in_remark:
+                            c_text = cycle_match_in_remark.group(1)
                             if not current_record["cycle"]:
-                                current_record["cycle"] = line
-                        else:
-                            cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
-                            if cycle_match_in_remark:
-                                c_text = cycle_match_in_remark.group(1)
-                                if not current_record["cycle"]:
-                                    current_record["cycle"] = c_text
-                                line = line.replace(c_text, "").strip()
+                                current_record["cycle"] = c_text
+                            line = line.replace(c_text, "").strip()
+                        
+                        if line:
+                            current_record["remarks"].append(line)
                             
-                            if line:
-                                current_record["remarks"].append(line)
+    except Exception as e:
+        st.error(f"PDFの読み込み中にエラーが発生しました: {e}")
+        return pd.DataFrame(), []
 
     data_list = []
     for rec in all_records:

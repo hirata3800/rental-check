@@ -49,6 +49,7 @@ if not check_password():
 # ==========================================
 
 def clean_currency(x):
+    """金額文字列を数値に変換"""
     if not x: return 0
     s = str(x).replace(',', '').replace('円', '').replace('¥', '').replace(' ', '').strip()
     try:
@@ -57,7 +58,11 @@ def clean_currency(x):
         return 0
 
 def extract_text_mode(file):
+    """
+    PDFをテキストとして解析する（軽量版：pypdf使用 + 備考/サイクル取得復活）
+    """
     all_records = []
+    current_record = None
     
     try:
         reader = PdfReader(file)
@@ -71,10 +76,14 @@ def extract_text_mode(file):
                 line = line.strip()
                 if not line: continue
                 
+                # 無視する行
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
                     continue
                 
+                # 行末の金額パターンを探す
                 match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
+                
+                is_user_line = False
                 
                 if match:
                     user_id = match.group(1)
@@ -83,31 +92,73 @@ def extract_text_mode(file):
                     amount_val = clean_currency(amount_str)
                     
                     if amount_val > 0:
+                        is_user_line = True
+                        
+                        # 名前のクリーニング（末尾の未収金額除去）
                         uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
                         if uncollected_match:
                             possible_money = clean_currency(uncollected_match.group(1))
                             if possible_money > 0:
                                 raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
+                        # サイクル文字の除去と取得
                         cycle_text = ""
                         cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
                         if cycle_match:
                             cycle_text = cycle_match.group(1)
                             raw_name_part = raw_name_part.replace(cycle_text, "").strip()
                         
+                        # NGワードチェック
                         ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
                         if any(kw in raw_name_part for kw in ng_keywords):
-                            continue
+                            is_user_line = False
                         else:
-                            all_records.append((user_id, raw_name_part, cycle_text, "", amount_val))
+                            current_record = {
+                                "id": user_id,
+                                "name": raw_name_part,
+                                "cycle": cycle_text,
+                                "remarks": [],
+                                "amount_val": amount_val
+                            }
+                            all_records.append(current_record)
+
+                if not is_user_line:
+                    if current_record:
+                        # サイクルだけの行の場合
+                        if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
+                            if not current_record["cycle"]:
+                                current_record["cycle"] = line
+                        else:
+                            # 備考の中にサイクルが混ざっている場合
+                            cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
+                            if cycle_match_in_remark:
+                                c_text = cycle_match_in_remark.group(1)
+                                if not current_record["cycle"]:
+                                    current_record["cycle"] = c_text
+                                line = line.replace(c_text, "").strip()
+                            
+                            if line:
+                                current_record["remarks"].append(line)
 
             del text
             del lines
+            gc.collect() # ページごとの掃除
             
     except Exception as e:
         return pd.DataFrame(), []
 
-    df = pd.DataFrame(all_records, columns=["id", "name", "cycle", "remarks", "amount_val"])
+    # 辞書リストからDataFrameへ変換
+    data_list = []
+    for rec in all_records:
+        data_list.append({
+            "id": rec["id"],
+            "name": rec["name"],
+            "cycle": rec["cycle"],
+            "remarks": " ".join(rec["remarks"]),
+            "amount_val": rec["amount_val"]
+        })
+
+    df = pd.DataFrame(data_list)
     gc.collect()
     return df
 
@@ -123,13 +174,12 @@ with col1:
 with col2:
     file_prev = st.file_uploader("② 前回請求分", type="pdf", key="t")
 
-# 解析結果を保持するためのセッションステート初期化
+# 解析結果を保持するためのセッションステート
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
 
 # ファイルがアップロードされたら解析実行
 if file_current and file_prev:
-    # 既に解析済みでなければ解析する
     if st.session_state.processed_data is None:
         with st.spinner('解析中...'):
             df_current = extract_text_mode(file_current)
@@ -169,7 +219,6 @@ if file_current and file_prev:
                 final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
                 final_view.insert(0, 'No.', range(1, len(final_view) + 1))
                 
-                # 解析結果を保存
                 st.session_state.processed_data = final_view
                 gc.collect()
 
@@ -177,7 +226,7 @@ if file_current and file_prev:
     if st.session_state.processed_data is not None:
         final_view = st.session_state.processed_data
         
-        # CSVダウンロードボタン（最優先）
+        # CSVダウンロードボタン
         csv_export = final_view.copy()
         csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
         csv_data = csv_export.to_csv(index=False).encode('utf-8-sig')
@@ -194,7 +243,7 @@ if file_current and file_prev:
         
         st.divider()
         
-        # === 【復活】色付け設定 ===
+        # 色付け設定
         def highlight_rows(row):
             styles = ['color: black'] * len(row)
             curr_idx = 5
@@ -216,8 +265,8 @@ if file_current and file_prev:
                         
             return styles
 
-        # === 【新機能】ページ切り替え ===
-        ROWS_PER_PAGE = 100 # 1ページあたりの表示件数
+        # ページ切り替え
+        ROWS_PER_PAGE = 100
         total_rows = len(final_view)
         total_pages = (total_rows - 1) // ROWS_PER_PAGE + 1
         
@@ -225,7 +274,6 @@ if file_current and file_prev:
         with c1:
             st.markdown(f"**全 {total_rows} 件**")
         with c2:
-            # ページ選択用ウィジェット
             current_page = st.number_input(
                 "ページ選択", 
                 min_value=1, 
@@ -233,14 +281,13 @@ if file_current and file_prev:
                 value=1
             )
         
-        # データの切り出し（スライス）
+        # 切り出し
         start_idx = (current_page - 1) * ROWS_PER_PAGE
         end_idx = start_idx + ROWS_PER_PAGE
         subset_view = final_view.iloc[start_idx:end_idx]
         
         st.caption(f"{start_idx + 1} 〜 {min(end_idx, total_rows)} 件目を表示中")
 
-        # 切り出したデータだけに色付けを適用（これなら落ちない！）
         st.dataframe(
             subset_view.style.apply(highlight_rows, axis=1),
             use_container_width=True,
@@ -249,11 +296,15 @@ if file_current and file_prev:
             column_config={
                 "No.": st.column_config.NumberColumn("No.", format="%d", width="small"),
                 "ID": st.column_config.TextColumn("ID"),
+                # 【修正点】判定列を非表示にする設定を追加
+                "is_new": None,
+                "is_diff": None,
+                "is_same": None
             }
         )
         
         gc.collect()
 
-# ファイルが削除されたらリセット
+# ファイル削除時はリセット
 else:
     st.session_state.processed_data = None

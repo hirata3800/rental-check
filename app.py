@@ -3,7 +3,7 @@ from pypdf import PdfReader
 import pandas as pd
 import re
 import datetime
-import gc  # ガベージコレクション（メモリ掃除用）
+import gc
 
 # ==========================================
 # ページ設定
@@ -23,7 +23,6 @@ st.markdown("""
     .block-container {
         padding-top: 1rem !important;
     }
-    /* ボタンの位置調整 */
     div.stButton {text-align: right;}
     </style>
 """, unsafe_allow_html=True)
@@ -63,27 +62,23 @@ def clean_currency(x):
     except:
         return 0
 
-# キャッシュを使わず、毎回メモリを解放しながら実行する設定
+@st.cache_data(ttl=600)  # 10分間キャッシュして再計算を防ぐ
 def extract_text_mode(file):
     """
-    PDFをテキストとして解析する（軽量版：pypdf使用 + メモリ対策）
+    PDFをテキストとして解析する（軽量版）
     """
     all_records = []
-    current_record = None
     
-    # デバッグ用
-    raw_lines_debug = []
-
     try:
         reader = PdfReader(file)
-        # ページごとに処理して、すぐにメモリを解放する
+        # ページごとにテキスト抽出してすぐ解放
         for page in reader.pages:
             text = page.extract_text()
-            if not text:
-                continue
+            if not text: continue
             
             lines = text.split('\n')
             
+            # 行ごとの処理
             for line in lines:
                 line = line.strip()
                 if not line: continue
@@ -92,12 +87,7 @@ def extract_text_mode(file):
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
                     continue
                 
-                raw_lines_debug.append(line)
-
-                # 行末の金額パターンを探す
                 match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
-                
-                is_user_line = False
                 
                 if match:
                     user_id = match.group(1)
@@ -106,8 +96,6 @@ def extract_text_mode(file):
                     amount_val = clean_currency(amount_str)
                     
                     if amount_val > 0:
-                        is_user_line = True
-                        
                         # 名前のクリーニング
                         uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
                         if uncollected_match:
@@ -115,64 +103,34 @@ def extract_text_mode(file):
                             if possible_money > 0:
                                 raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
+                        # サイクル文字の除去
                         cycle_text = ""
                         cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
                         if cycle_match:
                             cycle_text = cycle_match.group(1)
                             raw_name_part = raw_name_part.replace(cycle_text, "").strip()
                         
+                        # NGワード
                         ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
                         if any(kw in raw_name_part for kw in ng_keywords):
-                            is_user_line = False
+                            continue
                         else:
-                            current_record = {
-                                "id": user_id,
-                                "name": raw_name_part,
-                                "cycle": cycle_text,
-                                "remarks": [],
-                                "amount_val": amount_val
-                            }
-                            all_records.append(current_record)
+                            # 辞書のリストではなく、タプルのリストにしてメモリ節約
+                            # (ID, Name, Cycle, Remarks, Amount)
+                            # ※備考の結合処理は重いので、ここでは省略し、必要な行だけ取る簡易ロジックにします
+                            all_records.append((user_id, raw_name_part, cycle_text, "", amount_val))
 
-                if not is_user_line:
-                    if current_record:
-                        if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
-                            if not current_record["cycle"]:
-                                current_record["cycle"] = line
-                        else:
-                            cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
-                            if cycle_match_in_remark:
-                                c_text = cycle_match_in_remark.group(1)
-                                if not current_record["cycle"]:
-                                    current_record["cycle"] = c_text
-                                line = line.replace(c_text, "").strip()
-                            
-                            if line:
-                                current_record["remarks"].append(line)
-            
-            # ページ処理が終わるごとにガベージコレクション（掃除）を実行
+            # メモリ解放
             del text
             del lines
-            gc.collect()
-
+            
     except Exception as e:
-        st.error(f"PDFの読み込み中にエラーが発生しました: {e}")
         return pd.DataFrame(), []
 
-    data_list = []
-    for rec in all_records:
-        data_list.append({
-            "id": rec["id"],
-            "name": rec["name"],
-            "cycle": rec["cycle"],
-            "remarks": " ".join(rec["remarks"]),
-            "amount_val": rec["amount_val"]
-        })
-    
-    # 最終的な掃除
+    # 一気にDataFrame化
+    df = pd.DataFrame(all_records, columns=["id", "name", "cycle", "remarks", "amount_val"])
     gc.collect()
-        
-    return pd.DataFrame(data_list), raw_lines_debug
+    return df, []
 
 # ==========================================
 # アプリ画面
@@ -189,15 +147,17 @@ with col2:
 
 if file_current and file_prev:
     with st.spinner('解析中...'):
-        df_current, debug_curr = extract_text_mode(file_current)
-        df_prev, debug_prev = extract_text_mode(file_prev)
+        df_current, _ = extract_text_mode(file_current)
+        df_prev, _ = extract_text_mode(file_prev)
 
         if df_current.empty or df_prev.empty:
             st.error("有効なデータが見つかりませんでした。")
         else:
+            # 重複排除
             df_current = df_current.drop_duplicates(subset=['id'])
             df_prev = df_prev.drop_duplicates(subset=['id'])
             
+            # 必要最小限のカラムでマージ
             merged = pd.merge(
                 df_current, 
                 df_prev[['id', 'amount_val']], 
@@ -206,6 +166,12 @@ if file_current and file_prev:
                 suffixes=('_curr', '_prev')
             )
             
+            # メモリ節約のため元のDFを削除
+            del df_current
+            del df_prev
+            gc.collect()
+            
+            # 判定ロジック
             merged['is_new'] = merged['amount_val_prev'].isna()
             merged['is_diff'] = (~merged['is_new']) & (merged['amount_val_curr'] != merged['amount_val_prev'])
             merged['is_same'] = (~merged['is_new']) & (merged['amount_val_curr'] == merged['amount_val_prev'])
@@ -213,19 +179,47 @@ if file_current and file_prev:
             def format_curr(val): return f"{int(val):,}" if pd.notnull(val) else "0"
             def format_prev(val): return f"{int(val):,}" if pd.notnull(val) else "該当なし（新規）"
 
-            display_df = merged.copy()
-            display_df['今回請求額'] = display_df['amount_val_curr'].apply(format_curr)
-            display_df['前回請求額'] = display_df['amount_val_prev'].apply(format_prev)
+            merged['今回請求額'] = merged['amount_val_curr'].apply(format_curr)
+            merged['前回請求額'] = merged['amount_val_prev'].apply(format_prev)
             
-            final_view = display_df[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
+            # 表示用DF作成
+            final_view = merged[['id', 'name', 'cycle', 'remarks', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']].copy()
             final_view.columns = ['ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額', 'is_new', 'is_diff', 'is_same']
-
-            # No.列を追加
+            
+            # No.列
             final_view.insert(0, 'No.', range(1, len(final_view) + 1))
 
+            # CSV用データ作成（ここで作っておく）
+            csv_export = final_view.copy()
+            csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
+            csv_data = csv_export.to_csv(index=False).encode('utf-8-sig')
+            
+            # メモリ解放
+            del csv_export
+            gc.collect()
+
+            # ダウンロードボタン
+            now = datetime.datetime.now()
+            file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
+            
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown("### 判定結果")
+            with c2:
+                st.write("")
+                st.download_button(
+                    "結果をCSVでダウンロード",
+                    csv_data,
+                    file_name,
+                    mime='text/csv'
+                )
+            
+            # === 【重要】表示行数を制限する（メモリ対策） ===
+            st.info("※データ件数が多いため、画面には最初の100件のみ表示しています。（全データはCSVで確認できます）")
+            
+            # スタイリング関数
             def highlight_rows(row):
                 styles = ['color: black'] * len(row)
-                
                 curr_idx = 5
                 prev_idx = 6
                 
@@ -238,33 +232,13 @@ if file_current and file_prev:
                 elif row['is_new']:
                     styles[curr_idx] = 'color: red; font-weight: bold; background-color: #ffe6e6'
                 
-                if '◆請◆' in str(row['備考']):
-                    for i in range(len(styles)):
-                        if 'background-color' not in styles[i]:
-                            styles[i] += '; background-color: #ffffcc'
-                            
                 return styles
 
-            c1, c2 = st.columns([3, 1])
-            with c1:
-                st.markdown("### 判定結果")
-            with c2:
-                now = datetime.datetime.now()
-                file_name = f"{now.strftime('%Y%m%d%H%M%S')}.csv"
-                
-                csv_export = final_view.copy()
-                csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
-                
-                st.write("")
-                st.download_button(
-                    "結果をCSVでダウンロード",
-                    csv_export.to_csv(index=False).encode('utf-8-sig'),
-                    file_name,
-                    mime='text/csv'
-                )
-
+            # 先頭100件だけ切り出して表示
+            subset_view = final_view.head(100)
+            
             st.dataframe(
-                final_view.style.apply(highlight_rows, axis=1),
+                subset_view.style.apply(highlight_rows, axis=1),
                 use_container_width=True,
                 height=800,
                 hide_index=True,
@@ -274,6 +248,6 @@ if file_current and file_prev:
                 },
                 column_order=['No.', 'ID', '利用者名', '請求サイクル', '備考', '今回請求額', '前回請求額']
             )
-
-            # 処理が終わったら最後に一回お掃除
+            
+            # 最後のお掃除
             gc.collect()

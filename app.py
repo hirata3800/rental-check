@@ -59,7 +59,7 @@ def clean_currency(x):
 
 def extract_text_mode(file):
     """
-    PDFをテキストとして解析する（軽量版：pypdf使用 + 備考/サイクル取得復活）
+    PDFをテキストとして解析する
     """
     all_records = []
     current_record = None
@@ -77,7 +77,7 @@ def extract_text_mode(file):
                 if not line: continue
                 
                 # 無視する行
-                if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line:
+                if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line or "年月日締" in line:
                     continue
                 
                 # 行末の金額パターンを探す
@@ -116,7 +116,7 @@ def extract_text_mode(file):
                             current_record = {
                                 "id": user_id,
                                 "name": raw_name_part,
-                                "cycle": cycle_text,
+                                "cycle": cycle_text, 
                                 "remarks": [],
                                 "amount_val": amount_val
                             }
@@ -124,25 +124,23 @@ def extract_text_mode(file):
 
                 if not is_user_line:
                     if current_record:
-                        # サイクルだけの行の場合
+                        # === 【修正】備考・サイクルの分離ロジック ===
+                        
+                        # パターンA：行全体が「6ヶ月」のようにサイクルだけの行（最強の証拠）
                         if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
-                            if not current_record["cycle"]:
-                                current_record["cycle"] = line
-                        else:
-                            # 備考の中にサイクルが混ざっている場合
-                            cycle_match_in_remark = re.search(r'(\d+\s*(?:ヶ月|年))', line)
-                            if cycle_match_in_remark:
-                                c_text = cycle_match_in_remark.group(1)
-                                if not current_record["cycle"]:
-                                    current_record["cycle"] = c_text
-                                line = line.replace(c_text, "").strip()
+                            current_record["cycle"] = line
+                            # サイクルだけの行なので備考には追加しない
                             
-                            if line:
-                                current_record["remarks"].append(line)
+                        # パターンB：それ以外（備考など）
+                        else:
+                            # 備考の中に「3ヶ月」などが混ざっていても、
+                            # それをサイクル欄に移動させたり、消したりしない。
+                            # 備考はすべて備考として保存する。
+                            current_record["remarks"].append(line)
 
             del text
             del lines
-            gc.collect() # ページごとの掃除
+            gc.collect() 
             
     except Exception as e:
         return pd.DataFrame(), []
@@ -174,11 +172,9 @@ with col1:
 with col2:
     file_prev = st.file_uploader("② 前回請求分", type="pdf", key="t")
 
-# 解析結果を保持するためのセッションステート
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
 
-# ファイルがアップロードされたら解析実行
 if file_current and file_prev:
     if st.session_state.processed_data is None:
         with st.spinner('解析中...'):
@@ -222,11 +218,9 @@ if file_current and file_prev:
                 st.session_state.processed_data = final_view
                 gc.collect()
 
-    # --- ここから表示処理 ---
     if st.session_state.processed_data is not None:
         final_view = st.session_state.processed_data
         
-        # CSVダウンロードボタン
         csv_export = final_view.copy()
         csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
         csv_data = csv_export.to_csv(index=False).encode('utf-8-sig')
@@ -243,7 +237,6 @@ if file_current and file_prev:
         
         st.divider()
         
-        # 色付け設定
         def highlight_rows(row):
             styles = ['color: black'] * len(row)
             curr_idx = 5
@@ -265,7 +258,6 @@ if file_current and file_prev:
                         
             return styles
 
-        # ページ切り替え
         ROWS_PER_PAGE = 100
         total_rows = len(final_view)
         total_pages = (total_rows - 1) // ROWS_PER_PAGE + 1
@@ -281,7 +273,6 @@ if file_current and file_prev:
                 value=1
             )
         
-        # 切り出し
         start_idx = (current_page - 1) * ROWS_PER_PAGE
         end_idx = start_idx + ROWS_PER_PAGE
         subset_view = final_view.iloc[start_idx:end_idx]
@@ -296,7 +287,6 @@ if file_current and file_prev:
             column_config={
                 "No.": st.column_config.NumberColumn("No.", format="%d", width="small"),
                 "ID": st.column_config.TextColumn("ID"),
-                # 【修正点】判定列を非表示にする設定を追加
                 "is_new": None,
                 "is_diff": None,
                 "is_same": None
@@ -305,6 +295,5 @@ if file_current and file_prev:
         
         gc.collect()
 
-# ファイル削除時はリセット
 else:
     st.session_state.processed_data = None

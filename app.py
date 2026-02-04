@@ -80,8 +80,11 @@ def extract_text_mode(file):
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line or "年月日締" in line:
                     continue
                 
-                # 行末の金額パターンを探す
-                match = re.match(r'^(\d{6,})\s+(.*?)\s+([\d,]+)$', line)
+                # === 【修正点】正規表現を変更 ===
+                # 以前: r'^(\d{6,})\s+(.*?)\s+([\d,]+)$' (行末は数字必須)
+                # 今回: r'^(\d{6,})\s+(.*)\s+([0-9,]+)(.*)$' (数字の後ろに何かあってもOK)
+                # ※金額部分を [0-9,]+ にして半角数字のみを対象にし、全角の「６」などが混ざらないように分離
+                match = re.match(r'^(\d{6,})\s+(.*)\s+([0-9,]+)(.*)$', line)
                 
                 is_user_line = False
                 
@@ -89,24 +92,36 @@ def extract_text_mode(file):
                     user_id = match.group(1)
                     raw_name_part = match.group(2).strip()
                     amount_str = match.group(3)
+                    trailing_part = match.group(4).strip() # 金額の後ろにくっついている文字
+                    
                     amount_val = clean_currency(amount_str)
                     
                     if amount_val > 0:
                         is_user_line = True
                         
-                        # 名前のクリーニング（末尾の未収金額除去）
+                        cycle_text = ""
+
+                        # 1. 金額の後ろにくっついている文字からサイクルを探す（例：「9000６ヶ月」の「６ヶ月」）
+                        if trailing_part:
+                            cycle_match_trailing = re.search(r'(\d+\s*(?:ヶ月|年))', trailing_part)
+                            if cycle_match_trailing:
+                                cycle_text = cycle_match_trailing.group(1)
+
+                        # 2. 名前のクリーニング（末尾の未収金額除去）
                         uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
                         if uncollected_match:
                             possible_money = clean_currency(uncollected_match.group(1))
                             if possible_money > 0:
                                 raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
-                        # サイクル文字の除去と取得
-                        cycle_text = ""
-                        cycle_match = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
-                        if cycle_match:
-                            cycle_text = cycle_match.group(1)
-                            raw_name_part = raw_name_part.replace(cycle_text, "").strip()
+                        # 3. 名前の中にサイクル文字が混ざっているか確認（除去するが、サイクルとしては trailing を優先）
+                        cycle_match_name = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
+                        if cycle_match_name:
+                            c_text_name = cycle_match_name.group(1)
+                            raw_name_part = raw_name_part.replace(c_text_name, "").strip()
+                            # まだサイクルが見つかってなければ採用
+                            if not cycle_text:
+                                cycle_text = c_text_name
                         
                         # NGワードチェック
                         ng_keywords = ["様の", "奥様", "ご主人", "回収", "集金"]
@@ -117,6 +132,7 @@ def extract_text_mode(file):
                                 "id": user_id,
                                 "name": raw_name_part,
                                 "cycle": cycle_text, 
+                                "is_cycle_fixed": bool(cycle_text), # 行内で見つかったなら確定扱い
                                 "remarks": [],
                                 "amount_val": amount_val
                             }
@@ -124,18 +140,12 @@ def extract_text_mode(file):
 
                 if not is_user_line:
                     if current_record:
-                        # === 【修正】備考・サイクルの分離ロジック ===
-                        
-                        # パターンA：行全体が「6ヶ月」のようにサイクルだけの行（最強の証拠）
+                        # サイクルだけの行の場合
                         if re.fullmatch(r'\d+\s*(?:ヶ月|年)', line):
                             current_record["cycle"] = line
-                            # サイクルだけの行なので備考には追加しない
-                            
-                        # パターンB：それ以外（備考など）
+                            current_record["is_cycle_fixed"] = True
                         else:
-                            # 備考の中に「3ヶ月」などが混ざっていても、
-                            # それをサイクル欄に移動させたり、消したりしない。
-                            # 備考はすべて備考として保存する。
+                            # 備考などはそのまま保存
                             current_record["remarks"].append(line)
 
             del text

@@ -59,16 +59,22 @@ def clean_currency(x):
 
 def extract_text_mode(file):
     """
-    PDFをテキストとして解析する
+    PDFをテキストとして解析し、データと「PDF記載の合計人数」を返す
     """
     all_records = []
     current_record = None
+    pdf_total_count = None  # PDFに記載されている合計人数
     
     try:
         reader = PdfReader(file)
+        full_text_for_count = "" # 合計人数を探すために全テキストを保持（メモリ注意だがテキストのみなら軽量）
+
         for page in reader.pages:
             text = page.extract_text()
             if not text: continue
+            
+            # 合計人数検索用にテキストを結合
+            full_text_for_count += text + "\n"
             
             lines = text.split('\n')
             
@@ -80,10 +86,7 @@ def extract_text_mode(file):
                 if "ページ" in line or "請求書チェックリスト" in line or "未収金額" in line or "合計" in line or "年月日締" in line:
                     continue
                 
-                # === 【修正点】正規表現を変更 ===
-                # 以前: r'^(\d{6,})\s+(.*?)\s+([\d,]+)$' (行末は数字必須)
-                # 今回: r'^(\d{6,})\s+(.*)\s+([0-9,]+)(.*)$' (数字の後ろに何かあってもOK)
-                # ※金額部分を [0-9,]+ にして半角数字のみを対象にし、全角の「６」などが混ざらないように分離
+                # 行末の金額パターンを探す（文字くっつき対応版）
                 match = re.match(r'^(\d{6,})\s+(.*)\s+([0-9,]+)(.*)$', line)
                 
                 is_user_line = False
@@ -92,7 +95,7 @@ def extract_text_mode(file):
                     user_id = match.group(1)
                     raw_name_part = match.group(2).strip()
                     amount_str = match.group(3)
-                    trailing_part = match.group(4).strip() # 金額の後ろにくっついている文字
+                    trailing_part = match.group(4).strip()
                     
                     amount_val = clean_currency(amount_str)
                     
@@ -101,25 +104,24 @@ def extract_text_mode(file):
                         
                         cycle_text = ""
 
-                        # 1. 金額の後ろにくっついている文字からサイクルを探す（例：「9000６ヶ月」の「６ヶ月」）
+                        # 1. 金額の後ろにくっついている文字からサイクルを探す
                         if trailing_part:
                             cycle_match_trailing = re.search(r'(\d+\s*(?:ヶ月|年))', trailing_part)
                             if cycle_match_trailing:
                                 cycle_text = cycle_match_trailing.group(1)
 
-                        # 2. 名前のクリーニング（末尾の未収金額除去）
+                        # 2. 名前のクリーニング
                         uncollected_match = re.search(r'([\d,]+)$', raw_name_part)
                         if uncollected_match:
                             possible_money = clean_currency(uncollected_match.group(1))
                             if possible_money > 0:
                                 raw_name_part = raw_name_part[:uncollected_match.start()].strip()
 
-                        # 3. 名前の中にサイクル文字が混ざっているか確認（除去するが、サイクルとしては trailing を優先）
+                        # 3. 名前の中にサイクル文字が混ざっているか
                         cycle_match_name = re.search(r'(\d+\s*(?:ヶ月|年))', raw_name_part)
                         if cycle_match_name:
                             c_text_name = cycle_match_name.group(1)
                             raw_name_part = raw_name_part.replace(c_text_name, "").strip()
-                            # まだサイクルが見つかってなければ採用
                             if not cycle_text:
                                 cycle_text = c_text_name
                         
@@ -132,7 +134,7 @@ def extract_text_mode(file):
                                 "id": user_id,
                                 "name": raw_name_part,
                                 "cycle": cycle_text, 
-                                "is_cycle_fixed": bool(cycle_text), # 行内で見つかったなら確定扱い
+                                "is_cycle_fixed": bool(cycle_text),
                                 "remarks": [],
                                 "amount_val": amount_val
                             }
@@ -145,17 +147,26 @@ def extract_text_mode(file):
                             current_record["cycle"] = line
                             current_record["is_cycle_fixed"] = True
                         else:
-                            # 備考などはそのまま保存
                             current_record["remarks"].append(line)
-
+        
+        # === PDF記載の合計人数を探す ===
+        # パターン: "合計： 149 名" や "合計 149名" など
+        # 最後にマッチしたものが総計である可能性が高い
+        matches = re.findall(r'合計[:：\s]*([0-9,]+)\s*名', full_text_for_count)
+        if matches:
+            # カンマを除去して数値化し、最後のものを採用
+            last_count_str = matches[-1]
+            pdf_total_count = clean_currency(last_count_str)
+            
+            # ページごとの掃除
             del text
             del lines
             gc.collect() 
             
     except Exception as e:
-        return pd.DataFrame(), []
+        return pd.DataFrame(), None
 
-    # 辞書リストからDataFrameへ変換
+    # DataFrame作成
     data_list = []
     for rec in all_records:
         data_list.append({
@@ -168,7 +179,8 @@ def extract_text_mode(file):
 
     df = pd.DataFrame(data_list)
     gc.collect()
-    return df
+    
+    return df, pdf_total_count
 
 # ==========================================
 # アプリ画面
@@ -182,23 +194,47 @@ with col1:
 with col2:
     file_prev = st.file_uploader("② 前回請求分", type="pdf", key="t")
 
+# セッション状態の初期化
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
+if 'check_results' not in st.session_state:
+    st.session_state.check_results = {}
 
+# 解析実行
 if file_current and file_prev:
     if st.session_state.processed_data is None:
         with st.spinner('解析中...'):
-            df_current = extract_text_mode(file_current)
+            # ① 今回分の解析
+            df_current, total_curr_pdf = extract_text_mode(file_current)
+            count_curr_extracted = len(df_current) if not df_current.empty else 0
+            
+            # 重複排除
+            if not df_current.empty:
+                df_current = df_current.drop_duplicates(subset=['id'])
+                count_curr_unique = len(df_current)
+            else:
+                count_curr_unique = 0
+
             gc.collect()
-            df_prev = extract_text_mode(file_prev)
+
+            # ② 前回分の解析
+            df_prev, total_prev_pdf = extract_text_mode(file_prev)
+            count_prev_extracted = len(df_prev) if not df_prev.empty else 0
+            
+            if not df_prev.empty:
+                df_prev = df_prev.drop_duplicates(subset=['id'])
+            
             gc.collect()
+
+            # === 結果保存 ===
+            st.session_state.check_results = {
+                "curr": {"extracted": count_curr_unique, "pdf_total": total_curr_pdf},
+                "prev": {"extracted": len(df_prev), "pdf_total": total_prev_pdf}
+            }
 
             if df_current.empty or df_prev.empty:
                 st.error("データが見つかりませんでした。")
             else:
-                df_current = df_current.drop_duplicates(subset=['id'])
-                df_prev = df_prev.drop_duplicates(subset=['id'])
-                
                 merged = pd.merge(
                     df_current, 
                     df_prev[['id', 'amount_val']], 
@@ -228,9 +264,42 @@ if file_current and file_prev:
                 st.session_state.processed_data = final_view
                 gc.collect()
 
+    # --- 結果表示画面 ---
     if st.session_state.processed_data is not None:
         final_view = st.session_state.processed_data
+        checks = st.session_state.check_results
         
+        # === 件数チェック結果の表示 ===
+        st.markdown("### 📊 抽出件数チェック")
+        c_check1, c_check2 = st.columns(2)
+        
+        # ① 今回分のチェック
+        with c_check1:
+            ext = checks["curr"]["extracted"]
+            pdf = checks["curr"]["pdf_total"]
+            if pdf:
+                if ext == pdf:
+                    st.success(f"**① 今回分**: {ext}件 (PDF記載: {pdf}名) ✅ 一致")
+                else:
+                    st.error(f"**① 今回分**: {ext}件 (PDF記載: {pdf}名) ⚠️ 不一致！")
+            else:
+                st.info(f"**① 今回分**: {ext}件 (PDF記載なし)")
+
+        # ② 前回分のチェック
+        with c_check2:
+            ext = checks["prev"]["extracted"]
+            pdf = checks["prev"]["pdf_total"]
+            if pdf:
+                if ext == pdf:
+                    st.success(f"**② 前回分**: {ext}件 (PDF記載: {pdf}名) ✅ 一致")
+                else:
+                    st.error(f"**② 前回分**: {ext}件 (PDF記載: {pdf}名) ⚠️ 不一致！")
+            else:
+                st.info(f"**② 前回分**: {ext}件 (PDF記載なし)")
+        
+        st.divider()
+
+        # CSVダウンロード
         csv_export = final_view.copy()
         csv_export['ID'] = csv_export['ID'].apply(lambda x: f'="{x}"')
         csv_data = csv_export.to_csv(index=False).encode('utf-8-sig')
@@ -245,8 +314,9 @@ if file_current and file_prev:
             mime='text/csv'
         )
         
-        st.divider()
+        st.write("")
         
+        # 色付けロジック
         def highlight_rows(row):
             styles = ['color: black'] * len(row)
             curr_idx = 5
@@ -268,20 +338,16 @@ if file_current and file_prev:
                         
             return styles
 
+        # ページ切り替え
         ROWS_PER_PAGE = 100
         total_rows = len(final_view)
         total_pages = (total_rows - 1) // ROWS_PER_PAGE + 1
         
-        c1, c2, c3 = st.columns([2, 2, 6])
-        with c1:
+        c_page1, c_page2, c_page3 = st.columns([2, 2, 6])
+        with c_page1:
             st.markdown(f"**全 {total_rows} 件**")
-        with c2:
-            current_page = st.number_input(
-                "ページ選択", 
-                min_value=1, 
-                max_value=total_pages, 
-                value=1
-            )
+        with c_page2:
+            current_page = st.number_input("ページ選択", min_value=1, max_value=total_pages, value=1)
         
         start_idx = (current_page - 1) * ROWS_PER_PAGE
         end_idx = start_idx + ROWS_PER_PAGE
@@ -302,7 +368,6 @@ if file_current and file_prev:
                 "is_same": None
             }
         )
-        
         gc.collect()
 
 else:
